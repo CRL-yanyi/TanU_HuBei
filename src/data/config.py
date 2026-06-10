@@ -8,7 +8,7 @@ class CaseConfig:
     """
     def __init__(self, case_dict):
         self.case_name = case_dict.get('case_name', 'hubei2030')
-        self.data_root = case_dict.get('data_root', '../湖北2030')
+        self.data_root = case_dict.get('data_root', './湖北2030')
         self.files = case_dict.get('files', {})
         self.directories = case_dict.get('directories', {})
         self.field_mappings = case_dict.get('field_mappings', {})

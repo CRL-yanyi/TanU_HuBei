@@ -143,3 +143,123 @@ def add_thermal_commitment_constraints(
         transition=transition_constraints,
         no_simultaneous_start_stop=no_simultaneous_constraints,
     )
+@dataclass
+class ThermalMinimumTimeConstraints:
+    """最小开机、停机时间约束句柄。"""
+
+    minimum_up: dict[ConstraintKey, Any]
+    minimum_down: dict[ConstraintKey, Any]
+    initial_residual: dict[ConstraintKey, Any]
+
+
+def add_thermal_minimum_time_constraints(
+    model: Any,
+    variables: ThermalVariables,
+    unit_ids: Iterable[str],
+    periods: Iterable[Hashable],
+    min_up_hours: Mapping[str, float],
+    min_down_hours: Mapping[str, float],
+    initial_on: Mapping[str, int],
+    initial_on_hours: Mapping[str, float],
+    initial_off_hours: Mapping[str, float],
+    step_hours: float = 1.0,
+) -> ThermalMinimumTimeConstraints:
+    """添加最小连续开机、停机时间及初始剩余时间约束。"""
+
+    if not math.isfinite(step_hours) or step_hours <= 0.0:
+        raise ValueError("时间步长必须是正数")
+
+    unit_ids = tuple(unit_ids)
+    periods = tuple(periods)
+
+    minimum_up_constraints = {}
+    minimum_down_constraints = {}
+    initial_residual_constraints = {}
+
+    for unit_id in unit_ids:
+        required_mappings = (
+            min_up_hours,
+            min_down_hours,
+            initial_on,
+            initial_on_hours,
+            initial_off_hours,
+        )
+        if any(unit_id not in mapping for mapping in required_mappings):
+            raise ValueError(f"机组 {unit_id} 缺少最小开停机参数")
+
+        minimum_up_hours = float(min_up_hours[unit_id])
+        minimum_down_hours = float(min_down_hours[unit_id])
+        initial_state = int(initial_on[unit_id])
+        elapsed_on_hours = float(initial_on_hours[unit_id])
+        elapsed_off_hours = float(initial_off_hours[unit_id])
+
+        numeric_values = (
+            minimum_up_hours,
+            minimum_down_hours,
+            elapsed_on_hours,
+            elapsed_off_hours,
+        )
+        if any(not math.isfinite(value) or value < 0.0 for value in numeric_values):
+            raise ValueError(f"机组 {unit_id} 的最小开停机参数不合法")
+
+        if initial_state not in (0, 1):
+            raise ValueError(f"机组 {unit_id} 的初始开机状态必须为 0 或 1")
+
+        up_periods = math.ceil(minimum_up_hours / step_hours)
+        down_periods = math.ceil(minimum_down_hours / step_hours)
+
+        for period_index, period in enumerate(periods):
+            key = (unit_id, period)
+
+            if key not in variables.is_on:
+                raise KeyError(f"缺少火电变量索引: {key}")
+
+            if up_periods > 0:
+                first_index = max(0, period_index - up_periods + 1)
+                startup_sum = poi.quicksum(
+                    variables.startup[unit_id, periods[index]]
+                    for index in range(first_index, period_index + 1)
+                )
+                minimum_up_constraints[key] = model.add_linear_constraint(
+                    startup_sum - variables.is_on[key],
+                    poi.Leq,
+                    0.0,
+                    name=f"thermal_minimum_up[{unit_id},{period}]",
+                )
+
+            if down_periods > 0:
+                first_index = max(0, period_index - down_periods + 1)
+                shutdown_sum = poi.quicksum(
+                    variables.shutdown[unit_id, periods[index]]
+                    for index in range(first_index, period_index + 1)
+                )
+                minimum_down_constraints[key] = model.add_linear_constraint(
+                    shutdown_sum + variables.is_on[key],
+                    poi.Leq,
+                    1.0,
+                    name=f"thermal_minimum_down[{unit_id},{period}]",
+                )
+
+        if initial_state == 1:
+            remaining_hours = max(0.0, minimum_up_hours - elapsed_on_hours)
+            forced_periods = math.ceil(remaining_hours / step_hours)
+            forced_value = 1.0
+        else:
+            remaining_hours = max(0.0, minimum_down_hours - elapsed_off_hours)
+            forced_periods = math.ceil(remaining_hours / step_hours)
+            forced_value = 0.0
+
+        for period in periods[:forced_periods]:
+            key = (unit_id, period)
+            initial_residual_constraints[key] = model.add_linear_constraint(
+                variables.is_on[key],
+                poi.Eq,
+                forced_value,
+                name=f"thermal_initial_residual[{unit_id},{period}]",
+            )
+
+    return ThermalMinimumTimeConstraints(
+        minimum_up=minimum_up_constraints,
+        minimum_down=minimum_down_constraints,
+        initial_residual=initial_residual_constraints,
+    )

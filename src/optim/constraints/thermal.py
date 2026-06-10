@@ -263,3 +263,120 @@ def add_thermal_minimum_time_constraints(
         minimum_down=minimum_down_constraints,
         initial_residual=initial_residual_constraints,
     )
+@dataclass
+class ThermalRampConstraints:
+    """火电向上和向下爬坡约束句柄。"""
+
+    ramp_up: dict[ConstraintKey, Any]
+    ramp_down: dict[ConstraintKey, Any]
+
+
+def add_thermal_ramp_constraints(
+    model: Any,
+    variables: ThermalVariables,
+    unit_ids: Iterable[str],
+    periods: Iterable[Hashable],
+    ramp_up_mw_per_h: Mapping[str, float],
+    ramp_down_mw_per_h: Mapping[str, float],
+    startup_ramp_mw: Mapping[str, float],
+    shutdown_ramp_mw: Mapping[str, float],
+    initial_on: Mapping[str, int],
+    initial_power_mw: Mapping[str, float],
+    step_hours: float = 1.0,
+) -> ThermalRampConstraints:
+    """添加常规、启动和停机爬坡约束。"""
+
+    if not math.isfinite(step_hours) or step_hours <= 0.0:
+        raise ValueError("时间步长必须是正数")
+
+    unit_ids = tuple(unit_ids)
+    periods = tuple(periods)
+
+    ramp_up_constraints = {}
+    ramp_down_constraints = {}
+
+    parameter_groups = (
+        ramp_up_mw_per_h,
+        ramp_down_mw_per_h,
+        startup_ramp_mw,
+        shutdown_ramp_mw,
+        initial_on,
+        initial_power_mw,
+    )
+
+    for unit_id in unit_ids:
+        if any(unit_id not in group for group in parameter_groups):
+            raise ValueError(f"机组 {unit_id} 缺少爬坡或初始状态参数")
+
+        ramp_up = float(ramp_up_mw_per_h[unit_id])
+        ramp_down = float(ramp_down_mw_per_h[unit_id])
+        startup_ramp = float(startup_ramp_mw[unit_id])
+        shutdown_ramp = float(shutdown_ramp_mw[unit_id])
+        initial_state = int(initial_on[unit_id])
+        initial_power = float(initial_power_mw[unit_id])
+
+        numeric_values = (
+            ramp_up,
+            ramp_down,
+            startup_ramp,
+            shutdown_ramp,
+            initial_power,
+        )
+        if any(not math.isfinite(value) or value < 0.0 for value in numeric_values):
+            raise ValueError(f"机组 {unit_id} 的爬坡参数不合法")
+
+        if initial_state not in (0, 1):
+            raise ValueError(f"机组 {unit_id} 的初始开机状态必须为 0 或 1")
+
+        if initial_state == 0 and initial_power != 0.0:
+            raise ValueError(f"机组 {unit_id} 初始停机时出力必须为 0")
+
+        for period_index, period in enumerate(periods):
+            key = (unit_id, period)
+
+            required_variables = (
+                variables.power,
+                variables.is_on,
+                variables.startup,
+                variables.shutdown,
+            )
+            if any(key not in group for group in required_variables):
+                raise KeyError(f"缺少火电变量索引: {key}")
+
+            current_power = variables.power[key]
+            current_on = variables.is_on[key]
+            startup = variables.startup[key]
+            shutdown = variables.shutdown[key]
+
+            if period_index == 0:
+                previous_power = initial_power
+                previous_on = initial_state
+            else:
+                previous_period = periods[period_index - 1]
+                previous_power = variables.power[unit_id, previous_period]
+                previous_on = variables.is_on[unit_id, previous_period]
+
+            ramp_up_constraints[key] = model.add_linear_constraint(
+                current_power
+                - previous_power
+                - ramp_up * step_hours * previous_on
+                - startup_ramp * startup,
+                poi.Leq,
+                0.0,
+                name=f"thermal_ramp_up[{unit_id},{period}]",
+            )
+
+            ramp_down_constraints[key] = model.add_linear_constraint(
+                previous_power
+                - current_power
+                - ramp_down * step_hours * current_on
+                - shutdown_ramp * shutdown,
+                poi.Leq,
+                0.0,
+                name=f"thermal_ramp_down[{unit_id},{period}]",
+            )
+
+    return ThermalRampConstraints(
+        ramp_up=ramp_up_constraints,
+        ramp_down=ramp_down_constraints,
+    )

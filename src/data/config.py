@@ -16,6 +16,7 @@ class CaseConfig:
         self.curves = case_dict.get('curves', {})
         self.dc_flows_config = case_dict.get('dc_flows_config', {})
         self.grid_zone_mapping = case_dict.get('grid_zone_mapping', {})
+        self.parameter_defaults = case_dict.get('parameter_defaults', {})
 
     def get_file_path(self, file_key, base_path=None):
         # 算出文件绝对路径

@@ -216,3 +216,27 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+#pycharm配置
+.idea
+
+# 本地原始数据，不上传 GitHub
+datasets/hubei2030/
+
+# 本地运行结果，不上传 GitHub
+results/
+
+# 求解器和模型日志文件
+*.lp
+*.ilp
+*.log
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 虚拟环境
+.venv/
+venv/
+

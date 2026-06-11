@@ -73,9 +73,18 @@ def run_pipeline_for_time_range(start_hour, end_hour, label):
     assert report.is_valid, f"Validation failed for time range: {label}!"
     print(f"\nSuccessfully verified pipeline for {label}.")
 
-if __name__ == "__main__":
-    # Test 24-hour window
+
+def test_pipeline_24_hours():
+    """测试 24 小时日前窗口 Pipeline"""
     run_pipeline_for_time_range(0, 23, "24 Hours Day-Ahead")
-    
-    # Test 168-hour window
+
+def test_pipeline_168_hours():
+    """测试 168 小时周前窗口 Pipeline"""
+    run_pipeline_for_time_range(0, 167, "168 Hours Week-Ahead")
+
+
+# 如果你依然想保留通过右键普通的 "Run" 运行的能力，可以保留这个：
+if __name__ == "__main__":
+    # 普通 Python 脚本运行入口
+    run_pipeline_for_time_range(0, 23, "24 Hours Day-Ahead")
     run_pipeline_for_time_range(0, 167, "168 Hours Week-Ahead")

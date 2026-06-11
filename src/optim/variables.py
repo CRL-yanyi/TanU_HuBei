@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass
 from typing import Any, Hashable, Iterable
 
@@ -67,3 +68,41 @@ def add_thermal_variables(
         startup=startup,
         shutdown=shutdown,
     )
+@dataclass
+class TransmissionVariables:
+    """区域间可控输电断面变量集合。"""
+
+    flow: dict[VariableKey, Any]
+
+
+def add_transmission_variables(
+    model: Any,
+    line_ids: Iterable[str],
+    periods: Iterable[Hashable],
+) -> TransmissionVariables:
+    """创建区域间可控断面功率变量。"""
+
+    line_ids = tuple(line_ids)
+    periods = tuple(periods)
+
+    if len(line_ids) != len(set(line_ids)):
+        raise ValueError("输电断面 ID 不能重复")
+
+    if len(periods) != len(set(periods)):
+        raise ValueError("时间索引不能重复")
+
+    keys = [
+        (line_id, period)
+        for line_id in line_ids
+        for period in periods
+    ]
+
+    flow = model.add_variables(
+        keys,
+        lb=-math.inf,
+        ub=math.inf,
+        domain=poi.VariableDomain.Continuous,
+        name="transmission_flow",
+    )
+
+    return TransmissionVariables(flow=flow)

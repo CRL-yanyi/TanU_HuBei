@@ -380,3 +380,96 @@ def add_thermal_ramp_constraints(
         ramp_up=ramp_up_constraints,
         ramp_down=ramp_down_constraints,
     )
+@dataclass
+class ThermalFixedStatusConstraints:
+    """Constraint handles for a fixed thermal commitment schedule."""
+
+    is_on: dict[ConstraintKey, Any]
+    startup: dict[ConstraintKey, Any]
+    shutdown: dict[ConstraintKey, Any]
+
+
+def add_thermal_fixed_status_constraints(
+    model: Any,
+    variables: ThermalVariables,
+    unit_ids: Iterable[str],
+    periods: Iterable[Hashable],
+    fixed_on: Mapping[ConstraintKey, int],
+    initial_on: Mapping[str, int],
+) -> ThermalFixedStatusConstraints:
+    """Fix commitment variables to a given ED schedule."""
+
+    unit_ids = tuple(unit_ids)
+    periods = tuple(periods)
+
+    if len(unit_ids) != len(set(unit_ids)):
+        raise ValueError("Thermal unit IDs must be unique")
+
+    if len(periods) != len(set(periods)):
+        raise ValueError("Periods must be unique")
+
+    is_on_constraints = {}
+    startup_constraints = {}
+    shutdown_constraints = {}
+
+    for unit_id in unit_ids:
+        if unit_id not in initial_on:
+            raise ValueError(
+                f"Missing initial commitment status for unit {unit_id}"
+            )
+
+        previous_status = int(initial_on[unit_id])
+        if previous_status not in (0, 1):
+            raise ValueError(
+                f"Initial commitment status must be 0 or 1: {unit_id}"
+            )
+
+        for period in periods:
+            key = (unit_id, period)
+
+            if key not in fixed_on:
+                raise ValueError(f"Missing fixed commitment status: {key}")
+
+            current_status = int(fixed_on[key])
+            if current_status not in (0, 1):
+                raise ValueError(
+                    f"Fixed commitment status must be 0 or 1: {key}"
+                )
+
+            required_variables = (
+                variables.is_on,
+                variables.startup,
+                variables.shutdown,
+            )
+            if any(key not in group for group in required_variables):
+                raise KeyError(f"Missing thermal variable: {key}")
+
+            startup_status = max(current_status - previous_status, 0)
+            shutdown_status = max(previous_status - current_status, 0)
+
+            is_on_constraints[key] = model.add_linear_constraint(
+                variables.is_on[key],
+                poi.Eq,
+                current_status,
+                name=f"thermal_fixed_is_on[{unit_id},{period}]",
+            )
+            startup_constraints[key] = model.add_linear_constraint(
+                variables.startup[key],
+                poi.Eq,
+                startup_status,
+                name=f"thermal_fixed_startup[{unit_id},{period}]",
+            )
+            shutdown_constraints[key] = model.add_linear_constraint(
+                variables.shutdown[key],
+                poi.Eq,
+                shutdown_status,
+                name=f"thermal_fixed_shutdown[{unit_id},{period}]",
+            )
+
+            previous_status = current_status
+
+    return ThermalFixedStatusConstraints(
+        is_on=is_on_constraints,
+        startup=startup_constraints,
+        shutdown=shutdown_constraints,
+    )

@@ -257,8 +257,6 @@ TanU_HuBei/
 
 本节列出项目当前的模块方向。每个模块都应通过独立的 `feature/<task-name>` 分支开发，并通过 Pull Request 合并到 `dev`。
 
-五人团队的具体职责、交付物、互审关系和阶段安排见 [`docs/task_division.md`](docs/task_division.md)。
-
 ### 5.1 项目框架与工程基础
 
 **目标：** 建立团队可以共同遵守的代码、配置、数据和测试目录。

@@ -24,6 +24,7 @@ class CaseConfig:
         if not filename:
             raise ValueError(f"配置文件中没有找到文件代号: '{file_key}'，请检查 YAML 文件。")
         if base_path:
+            # 如果提供了 base_path (即项目根目录)，拼接为: base_path + data_root + filename
             return os.path.normpath(os.path.join(base_path, self.data_root, filename))
         return os.path.normpath(os.path.join(self.data_root, filename))
 

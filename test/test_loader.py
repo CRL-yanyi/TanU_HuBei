@@ -7,7 +7,7 @@ from src.data.loader import load_case, validate_case_data
 from src.data.case_data import CaseData
 
 # Path to the hubei2030 case configuration
-CONFIG_PATH = os.path.normpath(os.path.join(os.path.dirname(__file__), '../../configs/cases/hubei2030.yaml'))
+CONFIG_PATH = os.path.normpath(os.path.join(os.path.dirname(__file__), '../configs/cases/hubei2030.yaml'))
 
 def test_config_parsing():
     """

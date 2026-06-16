@@ -1,12 +1,166 @@
 # -*- coding: utf-8 -*-
 import os
+import re
 import pandas as pd
+import numpy as np
+import xml.etree.ElementTree as ET
 from typing import Dict, List, Tuple
 from .config import CaseConfig, TimeConfig, load_case_config
-from .case_data import CaseData
-from .excel_reader import load_excel
-from .helpers import load_single_curve, get_zone_by_grid
-from .validation import validate_case_data
+from .case_data import CaseData, DataValidationReport
+
+def parse_xml_spreadsheet(file_path: str) -> Dict[str, pd.DataFrame]:
+    """
+    解析 XML Spreadsheet 2003 格式的 Excel 文件，并进行特殊字符（如 &）容错处理。
+    """
+    namespaces = {'ss': 'urn:schemas-microsoft-com:office:spreadsheet'}
+    with open(file_path, 'rb') as f:
+        content = f.read()
+    
+    # 预处理：替换未转义的 & 符号，防止 XML 解析器报错
+    content = content.replace(b'&', b'&amp;')
+    content = content.replace(b'&amp;amp;', b'&amp;')
+    content = content.replace(b'&amp;lt;', b'&lt;')
+    content = content.replace(b'&amp;gt;', b'&gt;')
+    content = content.replace(b'&amp;quot;', b'&quot;')
+    content = content.replace(b'&amp;apos;', b'&apos;')
+    
+    # 解码
+    try:
+        content_str = content.decode('utf-8')
+    except UnicodeDecodeError:
+        content_str = content.decode('gbk', errors='ignore')
+        
+    root = ET.fromstring(content_str.encode('utf-8'))
+    worksheets = root.findall('.//ss:Worksheet', namespaces)
+    sheets_dict = {}
+    
+    for ws in worksheets:
+        sheet_name = ws.get('{urn:schemas-microsoft-com:office:spreadsheet}Name')
+        table = ws.find('.//ss:Table', namespaces)
+        if table is None:
+            continue
+            
+        rows_data = []
+        rows = table.findall('.//ss:Row', namespaces)
+        for r in rows:
+            cells_data = []
+            cells = r.findall('.//ss:Cell', namespaces)
+            for c in cells:
+                # 处理可能包含的 ss:Index 属性（跳过空列）
+                index_attr = c.get('{urn:schemas-microsoft-com:office:spreadsheet}Index')
+                if index_attr is not None:
+                    target_idx = int(index_attr) - 1
+                    while len(cells_data) < target_idx:
+                        cells_data.append(None)
+                
+                data_el = c.find('.//ss:Data', namespaces)
+                if data_el is not None:
+                    cells_data.append(data_el.text)
+                else:
+                    cells_data.append(None)
+            rows_data.append(cells_data)
+            
+        if not rows_data:
+            continue
+            
+        # 对齐列长度
+        max_len = max(len(row) for row in rows_data)
+        for row in rows_data:
+            while len(row) < max_len:
+                row.append(None)
+                
+        # 处理表头与重复列名
+        header = rows_data[0]
+        seen = {}
+        resolved_header = []
+        for i, h in enumerate(header):
+            if h is None or h == '':
+                name = f"Unnamed: {i}"
+            else:
+                name = str(h).strip()
+            if name in seen:
+                seen[name] += 1
+                name = f"{name}.{seen[name]}"
+            else:
+                seen[name] = 0
+            resolved_header.append(name)
+            
+        df = pd.DataFrame(rows_data[1:], columns=resolved_header)
+        
+        # 自动尝试将数字类型的字符串转换为数值
+        for col in df.columns:
+            try:
+                df[col] = pd.to_numeric(df[col])
+            except (ValueError, TypeError):
+                pass
+                
+        sheets_dict[sheet_name] = df
+        
+    return sheets_dict
+
+
+def load_excel(file_path: str) -> Dict[str, pd.DataFrame]:
+    """
+    智能载入 Excel 文件，自动识别标准 Excel 与 XML Spreadsheet 2003。
+    """
+    is_xml_spreadsheet = False
+    try:
+        with open(file_path, 'rb') as f:
+            start_bytes = f.read(100)
+            if b'<?xml' in start_bytes:
+                is_xml_spreadsheet = True
+    except Exception:
+        pass
+        
+    if is_xml_spreadsheet:
+        return parse_xml_spreadsheet(file_path)
+    else:
+        xls = pd.ExcelFile(file_path)
+        return {sheet: pd.read_excel(xls, sheet_name=sheet) for sheet in xls.sheet_names}
+
+
+def flatten_365_24_to_8760(df: pd.DataFrame) -> pd.Series:
+    """
+    将 365天 * 24小时 的二维行排列 DataFrame 展平为 8760 小时的一维时序数据。
+    """
+    # 过滤掉非小时字段，通常保留 0-23、0时-23时或后 24 列
+    hourly_cols = [c for c in df.columns if c != '日期' and c != 'Date' and not str(c).startswith('Unnamed')]
+    if len(hourly_cols) != 24:
+        # fallback: 直接取最后 24 列
+        hourly_cols = list(df.columns[-24:])
+    
+    # 扁平化数据
+    flat_data = df[hourly_cols].values.flatten()
+    return pd.Series(flat_data)
+
+
+def load_single_curve(file_path: str) -> pd.Series:
+    """
+    通用曲线加载器：自动处理 365*24 二维格式 与 8760*2 一维格式。
+    """
+    sheets = load_excel(file_path)
+    first_sheet = list(sheets.values())[0]
+    
+    if first_sheet.shape[1] >= 24:
+        # 365天 * 24小时格式
+        return flatten_365_24_to_8760(first_sheet)
+    else:
+        # 8760 一维行格式，取第二列数据
+        val_col = [c for c in first_sheet.columns if c != '日期' and c != 'Date'][0]
+        return first_sheet[val_col]
+
+
+def get_zone_by_grid(grid_name: str, mapping: dict) -> str:
+    """
+    根据所属电网名称及配置的映射字典推导所属分区。
+    """
+    if not isinstance(grid_name, str) or not mapping:
+        return ""
+    for city, zone in mapping.items():
+        if city in grid_name:
+            return zone
+    return ""
+
 
 def load_case(case_config_path: str, time_config: TimeConfig = None, scenario: int = None) -> CaseData:
     """
@@ -216,4 +370,109 @@ def load_case(case_config_path: str, time_config: TimeConfig = None, scenario: i
         hydro_flows=hydro_flows,
         dc_flows=dc_flows,
         metadata=metadata
+    )
+
+
+def validate_case_data(case_data: CaseData) -> DataValidationReport:
+    """
+    对已载入的数据类做业务和物理常识性校验。
+    """
+    errors = []
+    warnings = []
+    
+    # 1. 检验必填字段与非空
+    for name, df in [
+        ('zones', case_data.zones),
+        ('transmissions', case_data.transmissions),
+        ('thermal_units', case_data.thermal_units),
+        ('hydro_units', case_data.hydro_units),
+        ('storage_units', case_data.storage_units)
+    ]:
+        if df.empty:
+            errors.append(f"数据表 '{name}' 为空，无法进行生产模拟！")
+            continue
+            
+        # 必须含有主键列
+        if name.endswith('units'):
+            if 'unit_id' not in df.columns:
+                errors.append(f"数据表 '{name}' 缺少必需的主键列 'unit_id'！")
+            else:
+                # 检查主键是否重复
+                dups = df['unit_id'].duplicated().sum()
+                if dups > 0:
+                    errors.append(f"数据表 '{name}' 存在 {dups} 个重复的 'unit_id' 机组编码！")
+                    
+    # 2. 检查分区与资源关联关系是否闭环
+    zone_names = set(case_data.zones['zone_name'].tolist()) if 'zone_name' in case_data.zones.columns else set()
+    
+    # 各机组的分区列
+    for unit_type, df in [
+        ('火电', case_data.thermal_units),
+        ('水电', case_data.hydro_units),
+        ('储能', case_data.storage_units)
+    ]:
+        if not df.empty and 'zone_name' in df.columns:
+            unassociated = df[~df['zone_name'].isin(zone_names)]['unit_id'].tolist()
+            if unassociated:
+                errors.append(f"以下{unit_type}机组关联的分区未在分区表中定义: {unassociated}")
+                
+    # 联络线的分区关联
+    if not case_data.transmissions.empty and 'zone_from' in case_data.transmissions.columns and 'zone_to' in case_data.transmissions.columns:
+        for side in ['zone_from', 'zone_to']:
+            unassociated_trans = case_data.transmissions[
+                ~case_data.transmissions[side].isin(zone_names) & 
+                (case_data.transmissions[side] != '外部电网')
+            ]['line_name'].tolist()
+            if unassociated_trans:
+                warnings.append(f"以下联络线的 {side} 分区未在分区表中定义且不是'外部电网': {unassociated_trans}")
+
+    # 3. 时序数据校验
+    load_len = len(case_data.load_curves)
+    wind_len = len(case_data.wind_curves)
+    pv_len = len(case_data.pv_curves)
+    
+    if load_len != wind_len or load_len != pv_len:
+        errors.append(f"时序曲线数据长度不一致！负荷: {load_len}, 风电: {wind_len}, 光伏: {pv_len}")
+        
+    # 检查负荷曲线是否含有负值
+    if not case_data.load_curves.empty:
+        neg_loads = (case_data.load_curves < 0).sum().sum()
+        if neg_loads > 0:
+            errors.append("负荷曲线中检测到负数负荷值，请检查原始数据！")
+
+    # 4. 物理参数合理性校验
+    # 储能效率和 SOC 范围 [0, 1]
+    if not case_data.storage_units.empty:
+        for col in ['charge_efficiency', 'discharge_efficiency']:
+            if col in case_data.storage_units.columns:
+                eff_violations = case_data.storage_units[
+                    (case_data.storage_units[col] < 0) |
+                    (case_data.storage_units[col] > 1.0)
+                ]['unit_id'].tolist()
+                if eff_violations:
+                    errors.append(f"以下储能机组的 {col} 超出标幺值范围 [0, 1.0]: {eff_violations}")
+
+    # 机组出力上下限关系: p_min_mw <= p_max_mw
+    if not case_data.thermal_units.empty and 'p_min_mw' in case_data.thermal_units.columns and 'p_max_mw' in case_data.thermal_units.columns:
+        violations = case_data.thermal_units[
+            case_data.thermal_units['p_min_mw'] > case_data.thermal_units['p_max_mw']
+        ]['unit_id'].tolist()
+        if violations:
+            errors.append(f"以下火电机组的最小出力大于最大出力限制: {violations}")
+
+    is_valid = len(errors) == 0
+    summary = {
+        'total_zones': len(case_data.zones),
+        'total_thermal_units': len(case_data.thermal_units),
+        'total_hydro_units': len(case_data.hydro_units),
+        'total_storage_units': len(case_data.storage_units),
+        'total_pumped_storage_units': len(case_data.pumped_storage_units),
+        'curve_length_hours': load_len
+    }
+
+    return DataValidationReport(
+        is_valid=is_valid,
+        errors=errors,
+        warnings=warnings,
+        summary=summary
     )

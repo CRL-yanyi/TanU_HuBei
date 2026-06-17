@@ -7,11 +7,7 @@ from src.data.loader import load_case, validate_case_data
 from src.data.case_data import CaseData
 
 # Path to the hubei2030 case configuration
-<<<<<<< HEAD
-CONFIG_PATH = os.path.normpath(os.path.join(os.path.dirname(__file__), '../../configs/cases/hubei2030.yaml'))
-=======
 CONFIG_PATH = os.path.normpath(os.path.join(os.path.dirname(__file__), '../configs/cases/hubei2030.yaml'))
->>>>>>> dev
 
 def test_config_parsing():
     """
@@ -101,8 +97,4 @@ def test_data_validation():
     
     bad_report = validate_case_data(bad_case_data)
     assert bad_report.is_valid is False
-<<<<<<< HEAD
     assert any("重复的 'unit_id'" in err for err in bad_report.errors)
-=======
-    assert any("重复的 'unit_id'" in err for err in bad_report.errors)
->>>>>>> dev

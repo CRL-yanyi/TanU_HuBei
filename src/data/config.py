@@ -16,10 +16,7 @@ class CaseConfig:
         self.curves = case_dict.get('curves', {})
         self.dc_flows_config = case_dict.get('dc_flows_config', {})
         self.grid_zone_mapping = case_dict.get('grid_zone_mapping', {})
-<<<<<<< HEAD
-=======
         self.parameter_defaults = case_dict.get('parameter_defaults', {})
->>>>>>> dev
 
     def get_file_path(self, file_key, base_path=None):
         # 算出文件绝对路径
@@ -27,10 +24,7 @@ class CaseConfig:
         if not filename:
             raise ValueError(f"配置文件中没有找到文件代号: '{file_key}'，请检查 YAML 文件。")
         if base_path:
-<<<<<<< HEAD
-=======
             # 如果提供了 base_path (即项目根目录)，拼接为: base_path + data_root + filename
->>>>>>> dev
             return os.path.normpath(os.path.join(base_path, self.data_root, filename))
         return os.path.normpath(os.path.join(self.data_root, filename))
 

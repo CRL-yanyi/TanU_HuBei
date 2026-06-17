@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import os
+<<<<<<< HEAD
 import re
 import pandas as pd
 import numpy as np
@@ -161,6 +162,15 @@ def get_zone_by_grid(grid_name: str, mapping: dict) -> str:
             return zone
     return ""
 
+=======
+import pandas as pd
+from typing import Dict, List, Tuple
+from .config import CaseConfig, TimeConfig, load_case_config
+from .case_data import CaseData
+from .excel_reader import load_excel
+from .helpers import load_single_curve, get_zone_by_grid
+from .validation import validate_case_data
+>>>>>>> dev
 
 def load_case(case_config_path: str, time_config: TimeConfig = None, scenario: int = None) -> CaseData:
     """
@@ -185,6 +195,7 @@ def load_case(case_config_path: str, time_config: TimeConfig = None, scenario: i
     thermal_file = config.get_file_path('thermal', project_root)
     thermal_df = list(load_excel(thermal_file).values())[0]
     thermal_df = thermal_df.rename(columns=config.get_mapping('thermal'))
+<<<<<<< HEAD
     # 火电机组变动成本换算: 变动运行费(元/kWh) * 1000 = 元/MWh
     if 'fuel_cost_per_kwh' in thermal_df.columns:
         # 若原始数据为空，提供默认值 0.35 元/kWh (即 350 元/MWh) 以免 NaN 导致计算或求解报错
@@ -196,10 +207,33 @@ def load_case(case_config_path: str, time_config: TimeConfig = None, scenario: i
         vom_series = vom_series.fillna(0.0)
         thermal_df['vom_cost_per_mwh'] = vom_series + thermal_df['fuel_cost_per_mwh']
         
+=======
+
+    # 火电机组变动成本换算: 变动运行费(元/kWh) * 1000 = 元/MWh
+    thermal_defaults = config.parameter_defaults.get('thermal', {})
+    if 'fuel_cost_per_kwh' not in thermal_defaults or 'vom_cost_per_mwh' not in thermal_defaults:
+        raise KeyError(
+            "配置文件中的 'parameter_defaults.thermal' 节点必须配置 'fuel_cost_per_kwh' 和 'vom_cost_per_mwh'！")
+    default_fuel_cost = thermal_defaults['fuel_cost_per_kwh']
+    default_vom_cost = thermal_defaults['vom_cost_per_mwh']
+    # 火电机组变动成本换算: 变动运行费(元/千瓦时) * 1000 = 元/MWh
+    if 'fuel_cost_per_kwh' in thermal_df.columns:
+        # 若原始数据为空，提供配置中的默认燃料成本
+        thermal_df['fuel_cost_per_kwh'] = thermal_df['fuel_cost_per_kwh'].fillna(default_fuel_cost)
+        thermal_df['fuel_cost_per_mwh'] = thermal_df['fuel_cost_per_kwh'] * 1000.0
+
+        # 若无变动运维成本，使用配置中的默认运维成本
+        vom_series = thermal_df['vom_cost_per_mwh'] if 'vom_cost_per_mwh' in thermal_df.columns else pd.Series(0.0,
+                                                                                                               index=thermal_df.index)
+        vom_series = vom_series.fillna(default_vom_cost)
+        thermal_df['vom_cost_per_mwh'] = vom_series + thermal_df['fuel_cost_per_mwh']
+
+>>>>>>> dev
     # 1.4 水电
     hydro_file = config.get_file_path('hydro', project_root)
     hydro_df = list(load_excel(hydro_file).values())[0]
     hydro_df = hydro_df.rename(columns=config.get_mapping('hydro'))
+<<<<<<< HEAD
     
     # 1.5 储能
     storage_file = config.get_file_path('storage', project_root)
@@ -208,6 +242,23 @@ def load_case(case_config_path: str, time_config: TimeConfig = None, scenario: i
     # 构造或推导缺少的属性
     # 1.5.1 初始电量(%) = 50.0
     storage_df['初始电量(%)'] = 50.0
+=======
+
+    # 1.5 储能
+    storage_file = config.get_file_path('storage', project_root)
+    storage_df = list(load_excel(storage_file).values())[0]
+
+    # 从配置读取默认参数，如果缺失直接抛出报错
+    storage_defaults = config.parameter_defaults.get('storage', {})
+    if 'init_soc_percent' not in storage_defaults:
+        raise KeyError("配置文件中的 'parameter_defaults.storage' 节点必须配置 'init_soc_percent'！")
+    default_storage_soc = storage_defaults['init_soc_percent']
+
+    # 构造或推导缺少的属性
+    # 1.5.1 初始电量(%)
+    storage_df['初始电量(%)'] = default_storage_soc
+
+>>>>>>> dev
     # 1.5.2 额定容量(MWh) = 额定功率(MW) * 充电时间(h)
     if '额定功率(MW)' in storage_df.columns and '充电时间(h)' in storage_df.columns:
         storage_df['额定容量(MWh)'] = storage_df['额定功率(MW)'] * storage_df['充电时间(h)']
@@ -225,10 +276,25 @@ def load_case(case_config_path: str, time_config: TimeConfig = None, scenario: i
     # 1.6 抽水蓄能
     pumped_file = config.get_file_path('pumped_storage', project_root)
     pumped_df = list(load_excel(pumped_file).values())[0]
+<<<<<<< HEAD
     
     # 构造或推导缺少的属性
     # 1.6.1 初始电量(%) = 50.0 (默认值)
     pumped_df['初始电量(%)'] = 50.0
+=======
+
+    # 从配置读取默认参数，如果缺失直接抛出报错
+    pumped_defaults = config.parameter_defaults.get('pumped_storage', {})
+    if 'init_soc_percent' not in pumped_defaults:
+        raise KeyError("配置文件中的 'parameter_defaults.pumped_storage' 节点必须配置 'init_soc_percent'！")
+
+    default_pumped_soc = pumped_defaults['init_soc_percent']
+
+    # 构造或推导缺少的属性
+    # 1.6.1 初始电量(%)
+    pumped_df['初始电量(%)'] = default_pumped_soc
+
+>>>>>>> dev
     # 1.6.2 额定容量(MWh) = 额定功率(MW) * 抽水时间(h)
     if '额定功率(MW)' in pumped_df.columns and '抽水时间(h)' in pumped_df.columns:
         pumped_df['额定容量(MWh)'] = pumped_df['额定功率(MW)'] * pumped_df['抽水时间(h)']
@@ -261,6 +327,7 @@ def load_case(case_config_path: str, time_config: TimeConfig = None, scenario: i
         load_dict[z] = load_single_curve(
             os.path.normpath(os.path.join(project_root, config.data_root, load_filename)))
 
+<<<<<<< HEAD
         # 2.2 风电 (优先在多场景文件夹找场景专属文件，找不到则回退到基础文件)
         wind_filename = wind_pattern.format(zone=z, suffix=suffix)
         wind_file_path = os.path.join(scenario_dir, wind_filename)
@@ -273,6 +340,23 @@ def load_case(case_config_path: str, time_config: TimeConfig = None, scenario: i
         pv_file_path = os.path.join(scenario_dir, pv_filename)
         if not os.path.exists(pv_file_path):
             pv_file_path = os.path.join(scenario_dir, pv_pattern.format(zone=z, suffix=""))
+=======
+        # 2.2 风电 (优先在多场景文件夹找场景专属文件，找不到直接抛出 FileNotFoundError)
+        wind_filename = wind_pattern.format(zone=z, suffix=suffix)
+        wind_file_path = os.path.join(scenario_dir, wind_filename)
+        if not os.path.exists(wind_file_path):
+            raise FileNotFoundError(
+                f"[ERROR] 场景数据缺失：未找到分区 '{z}' 在场景 '{scenario}' 下的风电时序文件: {wind_file_path}"
+            )
+        wind_dict[z] = load_single_curve(wind_file_path)
+        # 2.3 光伏 (优先在多场景文件夹找场景专属文件，找不到直接抛出 FileNotFoundError)
+        pv_filename = pv_pattern.format(zone=z, suffix=suffix)
+        pv_file_path = os.path.join(scenario_dir, pv_filename)
+        if not os.path.exists(pv_file_path):
+            raise FileNotFoundError(
+                f"[ERROR] 场景数据缺失：未找到分区 '{z}' 在场景 '{scenario}' 下的光伏时序文件: {pv_file_path}"
+            )
+>>>>>>> dev
         pv_dict[z] = load_single_curve(pv_file_path)
 
     load_curves = pd.DataFrame(load_dict)
@@ -344,6 +428,7 @@ def load_case(case_config_path: str, time_config: TimeConfig = None, scenario: i
         dc_flows=dc_flows,
         metadata=metadata
     )
+<<<<<<< HEAD
 
 
 def validate_case_data(case_data: CaseData) -> DataValidationReport:
@@ -449,3 +534,5 @@ def validate_case_data(case_data: CaseData) -> DataValidationReport:
         warnings=warnings,
         summary=summary
     )
+=======
+>>>>>>> dev

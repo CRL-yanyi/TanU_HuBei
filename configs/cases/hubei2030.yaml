@@ -1,5 +1,9 @@
 case_name: "hubei2030"
+<<<<<<< HEAD
 data_root: "../湖北2030"
+=======
+data_root: "./湖北2030"
+>>>>>>> dev
 
 files:
   zone: "分区.xls"
@@ -106,4 +110,17 @@ grid_zone_mapping:
   "十堰": "鄂西北"
   "襄樊": "鄂西北"
   "襄阳": "鄂西北"
+<<<<<<< HEAD
   "神农架": "鄂西北"
+=======
+  "神农架": "鄂西北"
+
+parameter_defaults:
+  thermal:
+    fuel_cost_per_kwh: 0.35      # 燃料成本默认值（元/kWh）
+    vom_cost_per_mwh: 0.0        # 变动运维成本默认值（元/MWh）
+  storage:
+    init_soc_percent: 0.5        # 储能初始电量默认值（实际读取的键名）
+  pumped_storage:
+    init_soc_percent: 0.5        # 抽蓄初始电量默认值（实际读取的键名）
+>>>>>>> dev

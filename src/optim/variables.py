@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import math
 from dataclasses import dataclass
 from typing import Any, Hashable, Iterable
@@ -34,28 +35,33 @@ def add_thermal_variables(
     if len(periods) != len(set(periods)):
         raise ValueError("时间索引不能重复")
 
+    # 1. 火电变量索引统一为 (机组ID, 时段)，便于后续约束按同一键取变量
     keys = [
         (unit_id, period)
         for unit_id in unit_ids
         for period in periods
     ]
 
+    # 1.1 火电出力变量：P_g,t >= 0
     power = model.add_variables(
         keys,
         lb=0.0,
         domain=poi.VariableDomain.Continuous,
         name="thermal_power",
     )
+    # 1.2 开机状态变量：u_g,t ∈ {0, 1}
     is_on = model.add_variables(
         keys,
         domain=poi.VariableDomain.Binary,
         name="thermal_is_on",
     )
+    # 1.3 启动状态变量：v_g,t ∈ {0, 1}
     startup = model.add_variables(
         keys,
         domain=poi.VariableDomain.Binary,
         name="thermal_startup",
     )
+    # 1.4 停机状态变量：w_g,t ∈ {0, 1}
     shutdown = model.add_variables(
         keys,
         domain=poi.VariableDomain.Binary,
@@ -91,12 +97,14 @@ def add_transmission_variables(
     if len(periods) != len(set(periods)):
         raise ValueError("时间索引不能重复")
 
+    # 2. 输电断面变量索引统一为 (断面ID, 时段)
     keys = [
         (line_id, period)
         for line_id in line_ids
         for period in periods
     ]
 
+    # 2.1 断面潮流变量：上下限由 transmission 约束按 Grid 参数设置
     flow = model.add_variables(
         keys,
         lb=-math.inf,

@@ -1,71 +1,40 @@
+# -*- coding: utf-8 -*-
 import math
-from dataclasses import dataclass
-from typing import Any, Hashable, Iterable, Mapping
+from typing import Any, Hashable, Iterable
 
 import pyoptinterface as poi
 
+from src.model.grid import Grid
 from src.optim.variables import ThermalVariables
-
-
-@dataclass
-class ThermalCostObjective:
-    """Expressions forming the thermal operating cost."""
-
-    variable_cost: Any
-    startup_cost: Any
-    shutdown_cost: Any
-    total_cost: Any
 
 
 def set_thermal_cost_objective(
     model: Any,
+    grid: Grid,
     variables: ThermalVariables,
-    unit_ids: Iterable[str],
     periods: Iterable[Hashable],
-    variable_cost_yuan_per_mwh: Mapping[str, float],
-    startup_cost_yuan: Mapping[str, float],
-    shutdown_cost_yuan: Mapping[str, float],
     step_hours: float = 1.0,
-) -> ThermalCostObjective:
-    """Set generation, startup, and shutdown costs as the objective."""
-
-    unit_ids = tuple(unit_ids)
-    periods = tuple(periods)
-
-    if len(unit_ids) != len(set(unit_ids)):
-        raise ValueError("Thermal unit IDs must be unique")
-
-    if len(periods) != len(set(periods)):
-        raise ValueError("Periods must be unique")
+) -> dict[str, Any]:
+    """设置火电发电成本、启动成本和停机成本目标函数。"""
 
     if not math.isfinite(step_hours) or step_hours <= 0.0:
         raise ValueError("step_hours must be a positive finite number")
 
-    cost_mappings = {
-        "variable cost": variable_cost_yuan_per_mwh,
-        "startup cost": startup_cost_yuan,
-        "shutdown cost": shutdown_cost_yuan,
-    }
-
-    for cost_name, mapping in cost_mappings.items():
-        for unit_id in unit_ids:
-            if unit_id not in mapping:
-                raise ValueError(f"Missing {cost_name} for unit {unit_id}")
-
-            value = float(mapping[unit_id])
-            if not math.isfinite(value) or value < 0.0:
-                raise ValueError(
-                    f"{cost_name} must be finite and nonnegative: {unit_id}"
-                )
-
+    periods = tuple(periods)
     variable_cost = poi.ExprBuilder()
     startup_cost = poi.ExprBuilder()
     shutdown_cost = poi.ExprBuilder()
 
-    for unit_id in unit_ids:
+    # 1. 按火电机组和时段累加成本项
+    for unit in grid.getResListFromType("THERMAL"):
+        unit_id = unit.id
+        # 1.1 读取线性发电成本、启动成本、停机成本
+        linear_cost = _thermal_linear_cost(unit)
+        startup_unit_cost = float(getattr(unit, "startUpCost", 0.0))
+        shutdown_unit_cost = float(getattr(unit, "shutDownCost", 0.0))
+
         for period in periods:
             key = (unit_id, period)
-
             if key not in variables.power:
                 raise KeyError(f"Missing thermal power variable: {key}")
             if key not in variables.startup:
@@ -73,30 +42,28 @@ def set_thermal_cost_objective(
             if key not in variables.shutdown:
                 raise KeyError(f"Missing thermal shutdown variable: {key}")
 
-            variable_cost += (
-                float(variable_cost_yuan_per_mwh[unit_id])
-                * step_hours
-                * variables.power[key]
-            )
-            startup_cost += (
-                float(startup_cost_yuan[unit_id])
-                * variables.startup[key]
-            )
-            shutdown_cost += (
-                float(shutdown_cost_yuan[unit_id])
-                * variables.shutdown[key]
-            )
+            # 1.2 发电成本：linearCost * P_g,t * Δt
+            variable_cost += linear_cost * step_hours * variables.power[key]
+            # 1.3 启动成本：startUpCost * v_g,t
+            startup_cost += startup_unit_cost * variables.startup[key]
+            # 1.4 停机成本：shutDownCost * w_g,t
+            shutdown_cost += shutdown_unit_cost * variables.shutdown[key]
 
+    # 2. 总目标：min 发电成本 + 启动成本 + 停机成本
     total_cost = variable_cost + startup_cost + shutdown_cost
+    model.set_objective(total_cost, poi.ObjectiveSense.Minimize)
 
-    model.set_objective(
-        total_cost,
-        poi.ObjectiveSense.Minimize,
-    )
+    return {
+        "variable_cost": variable_cost,
+        "startup_cost": startup_cost,
+        "shutdown_cost": shutdown_cost,
+        "total_cost": total_cost,
+    }
 
-    return ThermalCostObjective(
-        variable_cost=variable_cost,
-        startup_cost=startup_cost,
-        shutdown_cost=shutdown_cost,
-        total_cost=total_cost,
-    )
+
+def _thermal_linear_cost(unit: Any) -> float:
+    # 3. 优先使用成员3标准字段 linearCost，兼容旧字段 variableCost
+    linear_cost = getattr(unit, "linearCost", None)
+    if linear_cost is not None:
+        return float(linear_cost)
+    return float(getattr(unit, "variableCost", 0.0))

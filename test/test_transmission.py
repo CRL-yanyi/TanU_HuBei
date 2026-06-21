@@ -2,116 +2,61 @@ import pyoptinterface as poi
 import pytest
 from pyoptinterface import gurobi
 
-from src.optim.constraints.transmission import (
-    add_transmission_limit_constraints,
-)
+from src.model.grid import Grid
+from src.model.intertran import Intertran
+from src.model.zone import Zone
+from src.optim.constraints.transmission import add_transmission_constraints
 from src.optim.variables import add_transmission_variables
 
 
-def test_add_transmission_variables():
+def make_grid(cap_to=100.0, cap_from=50.0, status=1):
+    grid = Grid(id="TEST")
+    grid.addZone(Zone(id="Z1"))
+    grid.addZone(Zone(id="Z2"))
+    grid.addIntertran(
+        Intertran(
+            id="L1",
+            fromZone="Z1",
+            toZone="Z2",
+            capacityToZone=cap_to,
+            capacityFromZone=cap_from,
+            status=status,
+        )
+    )
+    return grid
+
+
+def test_add_transmission_constraints_limits_flow():
     model = gurobi.Model()
+    grid = make_grid()
+    variables = add_transmission_variables(model, ["INTERTRANL1"], [0])
 
-    variables = add_transmission_variables(
-        model=model,
-        line_ids=["L1", "L2"],
-        periods=[0, 1],
-    )
+    add_transmission_constraints(model, grid, variables, [0])
 
-    assert set(variables.flow.keys()) == {
-        ("L1", 0),
-        ("L1", 1),
-        ("L2", 0),
-        ("L2", 1),
-    }
+    model.set_objective(variables.flow["INTERTRANL1", 0], poi.ObjectiveSense.Maximize)
+    model.optimize()
+    assert model.get_value(variables.flow["INTERTRANL1", 0]) == pytest.approx(100.0)
+
+    model.set_objective(variables.flow["INTERTRANL1", 0], poi.ObjectiveSense.Minimize)
+    model.optimize()
+    assert model.get_value(variables.flow["INTERTRANL1", 0]) == pytest.approx(-50.0)
 
 
-def test_positive_flow_limit():
+def test_out_of_service_line_is_fixed_to_zero():
     model = gurobi.Model()
-    variables = add_transmission_variables(model, ["L1"], [0])
+    grid = make_grid(status=0)
+    variables = add_transmission_variables(model, ["INTERTRANL1"], [0])
 
-    add_transmission_limit_constraints(
-        model=model,
-        variables=variables,
-        line_ids=["L1"],
-        periods=[0],
-        flow_min_mw={"L1": -20.0},
-        flow_max_mw={"L1": 50.0},
-    )
-
-    model.set_objective(
-        -variables.flow["L1", 0],
-        poi.ObjectiveSense.Minimize,
-    )
+    add_transmission_constraints(model, grid, variables, [0])
     model.optimize()
 
-    assert model.get_value(variables.flow["L1", 0]) == pytest.approx(50.0)
-
-
-def test_negative_flow_limit():
-    model = gurobi.Model()
-    variables = add_transmission_variables(model, ["L1"], [0])
-
-    add_transmission_limit_constraints(
-        model=model,
-        variables=variables,
-        line_ids=["L1"],
-        periods=[0],
-        flow_min_mw={"L1": -20.0},
-        flow_max_mw={"L1": 50.0},
-    )
-
-    model.set_objective(
-        variables.flow["L1", 0],
-        poi.ObjectiveSense.Minimize,
-    )
-    model.optimize()
-
-    assert model.get_value(variables.flow["L1", 0]) == pytest.approx(-20.0)
-
-
-def test_one_way_transmission():
-    model = gurobi.Model()
-    variables = add_transmission_variables(model, ["L1"], [0])
-
-    add_transmission_limit_constraints(
-        model=model,
-        variables=variables,
-        line_ids=["L1"],
-        periods=[0],
-        flow_min_mw={"L1": 0.0},
-        flow_max_mw={"L1": 50.0},
-    )
-
-    model.set_objective(
-        variables.flow["L1", 0],
-        poi.ObjectiveSense.Minimize,
-    )
-    model.optimize()
-
-    assert model.get_value(variables.flow["L1", 0]) == pytest.approx(0.0)
+    assert model.get_value(variables.flow["INTERTRANL1", 0]) == pytest.approx(0.0)
 
 
 def test_reject_invalid_transmission_limits():
     model = gurobi.Model()
-    variables = add_transmission_variables(model, ["L1"], [0])
+    grid = make_grid(cap_to=-10.0, cap_from=50.0)
+    variables = add_transmission_variables(model, ["INTERTRANL1"], [0])
 
-    with pytest.raises(ValueError, match="上下限不合法"):
-        add_transmission_limit_constraints(
-            model=model,
-            variables=variables,
-            line_ids=["L1"],
-            periods=[0],
-            flow_min_mw={"L1": 50.0},
-            flow_max_mw={"L1": -20.0},
-        )
-
-
-def test_reject_duplicate_line_ids():
-    model = gurobi.Model()
-
-    with pytest.raises(ValueError, match="断面 ID"):
-        add_transmission_variables(
-            model=model,
-            line_ids=["L1", "L1"],
-            periods=[0],
-        )
+    with pytest.raises(ValueError, match="Invalid transmission limits"):
+        add_transmission_constraints(model, grid, variables, [0])

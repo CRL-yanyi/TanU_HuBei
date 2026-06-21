@@ -2,10 +2,10 @@ import pyoptinterface as poi
 import pytest
 from pyoptinterface import gurobi
 
-from src.optim.constraints.thermal import (
-    add_thermal_commitment_constraints,
-    add_thermal_minimum_time_constraints,
-)
+from src.model.grid import Grid
+from src.model.resource import Thermal
+from src.model.zone import Zone
+from src.optim.constraints.thermal import add_thermal_uc_constraints
 from src.optim.variables import add_thermal_variables
 
 
@@ -18,23 +18,31 @@ def build_model(
     min_down_hours,
 ):
     model = gurobi.Model()
-    variables = add_thermal_variables(model, ["G1"], periods)
-
-    add_thermal_commitment_constraints(
-        model=model,
-        variables=variables,
-        unit_ids=["G1"],
-        periods=periods,
-        initial_on={"G1": initial_on},
+    grid = Grid(id="TEST")
+    grid.addZone(Zone(id="Z1"))
+    unit = Thermal(
+        id="G1",
+        zoneId="Z1",
+        type="THERMAL",
+        Pmin=0.0,
+        Pmax=100.0,
+        rampUp=100.0,
+        rampDown=100.0,
+        minON=min_up_hours,
+        minOFF=min_down_hours,
     )
-    add_thermal_minimum_time_constraints(
+    unit.startUpCapacity = 100.0
+    unit.shutDownCapacity = 100.0
+    grid.addResource(unit)
+
+    variables = add_thermal_variables(model, ["G1"], periods)
+    add_thermal_uc_constraints(
         model=model,
+        grid=grid,
         variables=variables,
-        unit_ids=["G1"],
         periods=periods,
-        min_up_hours={"G1": min_up_hours},
-        min_down_hours={"G1": min_down_hours},
         initial_on={"G1": initial_on},
+        initial_power_mw={"G1": 0.0 if initial_on == 0 else 10.0},
         initial_on_hours={"G1": initial_on_hours},
         initial_off_hours={"G1": initial_off_hours},
         step_hours=1.0,
@@ -61,13 +69,8 @@ def test_unit_stays_on_for_minimum_up_time():
     )
     model.optimize()
 
-    expected_status = [1.0, 1.0, 1.0, 0.0]
-    actual_status = [
-        model.get_value(variables.is_on["G1", t])
-        for t in periods
-    ]
-
-    assert actual_status == pytest.approx(expected_status)
+    actual_status = [model.get_value(variables.is_on["G1", t]) for t in periods]
+    assert actual_status == pytest.approx([1.0, 1.0, 1.0, 0.0])
 
 
 def test_unit_stays_off_for_minimum_down_time():
@@ -88,13 +91,8 @@ def test_unit_stays_off_for_minimum_down_time():
     )
     model.optimize()
 
-    expected_status = [0.0, 0.0, 1.0]
-    actual_status = [
-        model.get_value(variables.is_on["G1", t])
-        for t in periods
-    ]
-
-    assert actual_status == pytest.approx(expected_status)
+    actual_status = [model.get_value(variables.is_on["G1", t]) for t in periods]
+    assert actual_status == pytest.approx([0.0, 0.0, 1.0])
 
 
 def test_initial_on_residual_time_is_enforced():
@@ -114,11 +112,7 @@ def test_initial_on_residual_time_is_enforced():
     )
     model.optimize()
 
-    actual_status = [
-        model.get_value(variables.is_on["G1", t])
-        for t in periods
-    ]
-
+    actual_status = [model.get_value(variables.is_on["G1", t]) for t in periods]
     assert actual_status == pytest.approx([1.0, 1.0, 0.0])
 
 
@@ -139,28 +133,22 @@ def test_initial_off_residual_time_is_enforced():
     )
     model.optimize()
 
-    actual_status = [
-        model.get_value(variables.is_on["G1", t])
-        for t in periods
-    ]
-
+    actual_status = [model.get_value(variables.is_on["G1", t]) for t in periods]
     assert actual_status == pytest.approx([0.0, 0.0, 1.0])
 
 
 def test_reject_non_positive_step_hours():
     model = gurobi.Model()
+    grid = Grid(id="TEST")
+    grid.addZone(Zone(id="Z1"))
+    grid.addResource(Thermal(id="G1", zoneId="Z1", type="THERMAL", Pmax=100.0))
     variables = add_thermal_variables(model, ["G1"], [0])
 
-    with pytest.raises(ValueError, match="时间步长"):
-        add_thermal_minimum_time_constraints(
+    with pytest.raises(ValueError, match="step_hours"):
+        add_thermal_uc_constraints(
             model=model,
+            grid=grid,
             variables=variables,
-            unit_ids=["G1"],
             periods=[0],
-            min_up_hours={"G1": 1},
-            min_down_hours={"G1": 1},
-            initial_on={"G1": 0},
-            initial_on_hours={"G1": 0},
-            initial_off_hours={"G1": 1},
             step_hours=0,
         )

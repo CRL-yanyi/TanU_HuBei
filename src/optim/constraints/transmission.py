@@ -1,74 +1,65 @@
-import math
-from dataclasses import dataclass
-from typing import Any, Hashable, Iterable, Mapping
+# -*- coding: utf-8 -*-
+from typing import Any, Hashable, Iterable
 
 import pyoptinterface as poi
 
+from src.model.grid import Grid
 from src.optim.variables import TransmissionVariables
 
 
-ConstraintKey = tuple[str, Hashable]
-
-
-@dataclass
-class TransmissionLimitConstraints:
-    """区域间输电断面上下限约束句柄。"""
-
-    lower: dict[ConstraintKey, Any]
-    upper: dict[ConstraintKey, Any]
-
-
-def add_transmission_limit_constraints(
+def add_transmission_constraints(
     model: Any,
+    grid: Grid,
     variables: TransmissionVariables,
-    line_ids: Iterable[str],
     periods: Iterable[Hashable],
-    flow_min_mw: Mapping[str, float],
-    flow_max_mw: Mapping[str, float],
-) -> TransmissionLimitConstraints:
-    """添加区域间可控断面的正向和反向输送限制。"""
+) -> dict[str, Any]:
+    """添加区域间输电断面潮流上下限约束。"""
 
-    line_ids = tuple(line_ids)
+    constraints: dict[str, Any] = {}
     periods = tuple(periods)
 
-    lower_constraints = {}
-    upper_constraints = {}
+    # 1. 按 Grid 中的跨区断面逐时段建立潮流上下限
+    for line in grid.intertrans.values():
+        # 正方向为 fromZone -> toZone，反方向容量写成负下限
+        capacity_from = float(line.capacityFromZone)
+        capacity_to = float(line.capacityToZone)
+        if capacity_from < 0.0 or capacity_to < 0.0:
+            raise ValueError(f"Invalid transmission limits for {line.id}")
 
-    for line_id in line_ids:
-        if line_id not in flow_min_mw or line_id not in flow_max_mw:
-            raise ValueError(f"断面 {line_id} 缺少输送上下限参数")
+        flow_min = -capacity_from
+        flow_max = capacity_to
 
-        minimum = float(flow_min_mw[line_id])
-        maximum = float(flow_max_mw[line_id])
+        # 1.1 断面停运时强制潮流为 0
+        if getattr(line, "status", 1) == 0:
+            flow_min = 0.0
+            flow_max = 0.0
 
-        if not math.isfinite(minimum) or not math.isfinite(maximum):
-            raise ValueError(f"断面 {line_id} 的输送上下限必须是有限数值")
-
-        if maximum < minimum:
-            raise ValueError(f"断面 {line_id} 的输送上下限不合法")
+        if flow_max < flow_min:
+            raise ValueError(f"Invalid transmission limits for {line.id}")
 
         for period in periods:
-            key = (line_id, period)
-
+            key = (line.id, period)
             if key not in variables.flow:
-                raise KeyError(f"缺少断面变量索引: {key}")
+                raise KeyError(f"Missing transmission flow variable: {key}")
 
             flow = variables.flow[key]
-
-            lower_constraints[key] = model.add_linear_constraint(
-                flow,
-                poi.Geq,
-                minimum,
-                name=f"transmission_lower[{line_id},{period}]",
+            # 1.2 断面下限：F_l,t >= -capacityFromZone
+            constraints[f"transmission_min_{line.id}_{period}"] = (
+                model.add_linear_constraint(
+                    flow,
+                    poi.Geq,
+                    flow_min,
+                    name=f"transmission_min[{line.id},{period}]",
+                )
             )
-            upper_constraints[key] = model.add_linear_constraint(
-                flow,
-                poi.Leq,
-                maximum,
-                name=f"transmission_upper[{line_id},{period}]",
+            # 1.3 断面上限：F_l,t <= capacityToZone
+            constraints[f"transmission_max_{line.id}_{period}"] = (
+                model.add_linear_constraint(
+                    flow,
+                    poi.Leq,
+                    flow_max,
+                    name=f"transmission_max[{line.id},{period}]",
+                )
             )
 
-    return TransmissionLimitConstraints(
-        lower=lower_constraints,
-        upper=upper_constraints,
-    )
+    return constraints

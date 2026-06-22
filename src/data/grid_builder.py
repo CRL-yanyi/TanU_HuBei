@@ -268,9 +268,9 @@ def _add_thermal_units(grid: Grid, case_data) -> None:
         thermal.minON = _optional_int(row, "min_up_time_h", default=0)
         thermal.minOFF = _optional_int(row, "min_down_time_h", default=0)
 
-        # 成员一 YAML 目前没有启动/停机成本字段，所以对象层默认 0。
-        # 后续如果成员一补字段，可以在这里再接入。
-        thermal.startUpCost = 0.0
+        # 从 Excel 中读取启停费用 (万元)，折算为元
+        startup_shutdown_cost_10k = _optional_float(row, "startup_shutdown_cost_10k", default=0.0)
+        thermal.startUpCost = startup_shutdown_cost_10k * 10000.0
         thermal.shutDownCost = 0.0
         # 火电变动成本，单位 元/MWh。
         thermal.variableCost = _optional_float(row, "vom_cost_per_mwh", default=0.0)
@@ -406,15 +406,20 @@ def _add_load_resources(grid: Grid, case_data) -> None:
         zone_name = str(zone_name)
         _require_zone_exists(grid, zone_name, "load_curves")
 
-        max_load = float(case_data.load_curves[zone_name].max())
+        # 从 load_spec 中获取真实的物理峰值负荷
+        peak_load = 1.0
+        if hasattr(case_data, "load_spec") and case_data.load_spec is not None and not case_data.load_spec.empty:
+            row = case_data.load_spec[case_data.load_spec['分区名称'] == zone_name]
+            if not row.empty:
+                peak_load = float(row.iloc[0]['年最大负荷（MW）'])
 
         load = Load(
             id=_with_prefix("LOAD", zone_name),
             name=f"{zone_name}负荷",
             zoneId=zone_name,
             type="LOAD",
-            capacity=max_load,
-            Pmax=max_load,
+            capacity=peak_load,
+            Pmax=peak_load,
             Pmin=0.0,
         )
 
@@ -433,6 +438,18 @@ def _add_wind_resources(grid: Grid, case_data) -> None:
         zone_name = str(zone_name)
         _require_zone_exists(grid, zone_name, "wind_curves")
 
+        # 读取月度装机规格 (包括增建容量)
+        monthly_caps = {}
+        if hasattr(case_data, "wind_spec") and case_data.wind_spec is not None and not case_data.wind_spec.empty:
+            row = case_data.wind_spec[case_data.wind_spec['分区名称'] == zone_name]
+            if not row.empty:
+                for m in range(1, 13):
+                    val = float(row.iloc[0][f"{m}月末"])
+                    added = float(row.iloc[0].get("增建容量", 0.0))
+                    if pd.isna(added):
+                        added = 0.0
+                    monthly_caps[m] = val + added
+
         wind = Wind(
             id=_with_prefix("WIND", zone_name),
             name=f"{zone_name}风电",
@@ -442,6 +459,7 @@ def _add_wind_resources(grid: Grid, case_data) -> None:
             Pmax=1.0,
             Pmin=0.0,
         )
+        wind.monthly_capacities = monthly_caps
 
         grid.addResource(wind)
 
@@ -457,6 +475,18 @@ def _add_pv_resources(grid: Grid, case_data) -> None:
         zone_name = str(zone_name)
         _require_zone_exists(grid, zone_name, "pv_curves")
 
+        # 读取月度装机规格 (包括增建容量)
+        monthly_caps = {}
+        if hasattr(case_data, "pv_spec") and case_data.pv_spec is not None and not case_data.pv_spec.empty:
+            row = case_data.pv_spec[case_data.pv_spec['分区名称'] == zone_name]
+            if not row.empty:
+                for m in range(1, 13):
+                    val = float(row.iloc[0][f"{m}月末"])
+                    added = float(row.iloc[0].get("增建容量", 0.0))
+                    if pd.isna(added):
+                        added = 0.0
+                    monthly_caps[m] = val + added
+
         pv = PV(
             id=_with_prefix("PV", zone_name),
             name=f"{zone_name}光伏",
@@ -466,6 +496,7 @@ def _add_pv_resources(grid: Grid, case_data) -> None:
             Pmax=1.0,
             Pmin=0.0,
         )
+        pv.monthly_capacities = monthly_caps
 
         grid.addResource(pv)
 
@@ -511,8 +542,15 @@ def _find_basin(grid: Grid, basin_id: str) -> Basin | None:
     Basin 被存放在：
         grid.zones[zone_id].basinDict
     """
+    # 尝试直接查找
     for zone in grid.zones.values():
         if basin_id in zone.basinDict:
             return zone.basinDict[basin_id]
+
+    # 尝试容错带 '鄂' 前缀的流域名称
+    alt_basin_id = basin_id.replace("BASIN", "BASIN鄂")
+    for zone in grid.zones.values():
+        if alt_basin_id in zone.basinDict:
+            return zone.basinDict[alt_basin_id]
 
     return None

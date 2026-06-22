@@ -62,6 +62,7 @@ class Wind(Resource):
     isSeries: bool = True
     curtailmentPenalty: float = 500.0
     TSCapacity: dict = field(default_factory=dict)
+    monthly_capacities: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -70,6 +71,7 @@ class PV(Resource):
     isSeries: bool = True
     curtailmentPenalty: float = 500.0
     TSCapacity: dict = field(default_factory=dict)
+    monthly_capacities: dict = field(default_factory=dict)
 
 
 @dataclass

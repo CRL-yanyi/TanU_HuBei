@@ -1,0 +1,29 @@
+# 湖北 2030 生产模拟运行配置文件
+
+case_name: "hubei2030"
+scenario: 0                 # 选用多场景数据组编号 (0-9)，0 对应基础无后缀文件，1-9 对应场景1-9
+
+simulation:
+  mode: "UC"                # UC (机组组合，优化状态) 或 ED (经济调度，固定状态)
+  start_hour: 0             # 运行起始小时 (0 - 8759)
+  end_hour: 8759              # 运行结束小时 (0 - 8759)
+  step_hours: 1.0           # 仿真时间步长 (小时)
+
+solver:
+  name: "gurobi"            # 求解器后端：gurobi, copt, cbc, glpk 等
+  mip_gap: 0.01             # 相对优化间隙 (Gap) 收敛阈值
+  time_limit: 300           # 单窗口求解最长耗时上限 (秒)
+  log_to_console: false     # 是否在控制台打印求解器日志
+
+rolling:
+  enable: True             # 是否启用时序滚动窗口调度
+  window_hours: 168         # 滚动窗口的跨度 (例如 168 小时 / 一周)
+  overlap_hours: 24         # 用于平滑边界过渡的重叠小时数 (例如 24 小时 / 一天)
+
+switches:
+  enable_reserve: true       # 是否添加系统备用约束
+  enable_transmission: true  # 是否添加区域间跨区输电断面极限约束
+  enable_cascade_hydro: false # 是否启动精细梯级水利流量守恒约束 (未来预留)
+  curtailment_penalty_wind: 500.0  # 弃风惩罚费用 (元/MWh)
+  curtailment_penalty_pv: 500.0    # 弃光惩罚费用 (元/MWh)
+  load_shed_penalty: 100000.0      # 失负荷惩罚费用 (元/MWh)

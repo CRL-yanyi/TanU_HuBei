@@ -27,19 +27,28 @@ def add_renewable_constraints(
     constraints = {}
 
     for k in renewable_units:
-        # 获取机组装机容量
-        capacity = k.capacity
         # 读取爬坡参数（如果有），否则默认为无限制
         ramp_up = getattr(k, "rampUp", float('inf'))
         ramp_down = getattr(k, "rampDown", float('inf'))
+
+        from src.optim.constraints.hydro import get_month_from_hour
 
         for i, t in enumerate(periods):
             # 获取时序预测系数 (标幺值)
             forecast_factor = k.TSCapacity.get(t, 0.0)
             
+            # Scheme B: 根据当前时段 t 映射到月份，并获取该月份的风光装机容量
+            try:
+                hour_val = int(t)
+                month = get_month_from_hour(hour_val)
+                cap_val = k.monthly_capacities.get(month, k.capacity)
+            except (ValueError, TypeError):
+                # 单元测试中的时段可能是 'T1' 等字符串，此时退化为使用默认 capacity
+                cap_val = k.capacity
+            
             # (2.5.1) 新新能源弃电与出力平衡
             # P_power + P_curt = Capacity * Forecast_Factor
-            p_pre = capacity * forecast_factor
+            p_pre = cap_val * forecast_factor
             constraints[f"ren_power_balance_{k.id}_{t}"] = model.add_linear_constraint(
                 variables.power[k.id, t] + variables.curtailment[k.id, t], poi.Eq, p_pre,
                 name=f"ren_power_balance_{k.id}_{t}",

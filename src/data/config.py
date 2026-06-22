@@ -64,3 +64,44 @@ def load_case_config(config_path):
     with open(config_path, 'r', encoding='utf-8') as f:
         case_dict = yaml.safe_load(f)
     return CaseConfig(case_dict)
+
+
+class RunConfig:
+    """
+    配置生产模拟运行时的整体参数，包括UC/ED模式、起止时间、滚动窗口和功能开关等。
+    """
+    def __init__(self, run_dict: dict):
+        self.case_name = run_dict.get("case_name", "hubei2030")
+        self.scenario = run_dict.get("scenario", None)
+        
+        sim = run_dict.get("simulation", {})
+        self.mode = sim.get("mode", "UC").upper()
+        self.start_hour = int(sim.get("start_hour", 0))
+        self.end_hour = int(sim.get("end_hour", 23))
+        self.step_hours = float(sim.get("step_hours", 1.0))
+        
+        sol = run_dict.get("solver", {})
+        self.solver_name = sol.get("name", "gurobi").lower()
+        self.mip_gap = float(sol.get("mip_gap", 0.01))
+        self.time_limit = float(sol.get("time_limit", 300))
+        self.log_to_console = bool(sol.get("log_to_console", False))
+        
+        roll = run_dict.get("rolling", {})
+        self.rolling_enable = bool(roll.get("enable", False))
+        self.window_hours = int(roll.get("window_hours", 168))
+        self.overlap_hours = int(roll.get("overlap_hours", 24))
+        
+        sw = run_dict.get("switches", {})
+        self.enable_reserve = bool(sw.get("enable_reserve", True))
+        self.enable_transmission = bool(sw.get("enable_transmission", True))
+        self.enable_cascade_hydro = bool(sw.get("enable_cascade_hydro", False))
+        
+        self.curtailment_penalty_wind = float(sw.get("curtailment_penalty_wind", 500.0))
+        self.curtailment_penalty_pv = float(sw.get("curtailment_penalty_pv", 500.0))
+        self.load_shed_penalty = float(sw.get("load_shed_penalty", 100000.0))
+
+
+def load_run_config(config_path: str) -> RunConfig:
+    with open(config_path, 'r', encoding='utf-8') as f:
+        run_dict = yaml.safe_load(f)
+    return RunConfig(run_dict)

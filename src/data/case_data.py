@@ -9,7 +9,8 @@ class CaseData:
 
     def __init__(self, zones, transmissions, thermal_units, hydro_units,
                  storage_units, pumped_storage_units, load_curves,
-                 wind_curves, pv_curves, hydro_flows=None, dc_flows=None, metadata=None):
+                 wind_curves, pv_curves, hydro_flows=None, dc_flows=None, 
+                 load_spec=None, wind_spec=None, pv_spec=None, metadata=None):
 
         self.zones = zones                  # 分区
         self.transmissions = transmissions  # 输电线路
@@ -22,6 +23,11 @@ class CaseData:
         self.load_curves = load_curves      # 全年负荷曲线
         self.wind_curves = wind_curves      # 全年风光曲线
         self.pv_curves = pv_curves          # 全年光伏曲线
+
+        # 原始装机/负荷规格配置表 (用于 Scheme B 动态物理容量放大)
+        self.load_spec = load_spec          # 负荷最大值及修正策略表
+        self.wind_spec = wind_spec          # 风电月度装机规格表
+        self.pv_spec = pv_spec              # 光伏月度装机规格表
 
         # 流域流量/出力过程线 (字典存储)
         self.hydro_flows = hydro_flows if hydro_flows is not None else {}

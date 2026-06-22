@@ -351,6 +351,16 @@ def load_case(case_config_path: str, time_config: TimeConfig = None, scenario: i
         if not dc_flows.empty:
             dc_flows = dc_flows.iloc[time_config.hours_list].reset_index(drop=True)
 
+    # 6. 读取容量规格配置表 (用于 Scheme B)
+    load_spec_file = config.get_file_path('load_spec', project_root)
+    load_spec_df = list(load_excel(load_spec_file).values())[0]
+
+    wind_spec_file = config.get_file_path('wind_spec', project_root)
+    wind_spec_df = list(load_excel(wind_spec_file).values())[0]
+
+    pv_spec_file = config.get_file_path('pv_spec', project_root)
+    pv_spec_df = list(load_excel(pv_spec_file).values())[0]
+
     metadata = {
         'case_config_path': case_config_path,
         'loaded_hours': len(load_curves),
@@ -369,6 +379,9 @@ def load_case(case_config_path: str, time_config: TimeConfig = None, scenario: i
         pv_curves=pv_curves,
         hydro_flows=hydro_flows,
         dc_flows=dc_flows,
+        load_spec=load_spec_df,
+        wind_spec=wind_spec_df,
+        pv_spec=pv_spec_df,
         metadata=metadata
     )
 

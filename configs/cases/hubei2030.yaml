@@ -50,6 +50,7 @@ field_mappings:
     "常规爬坡速率": "ramp_rate_mw_per_min"
     "变动运行费(元/千瓦时)": "fuel_cost_per_kwh"
     "运行维护成本(元/兆瓦时)": "vom_cost_per_mwh"
+    "启停费用(万元)": "startup_shutdown_cost_10k"
   hydro:
     "机组编码": "unit_id"
     "所属厂站": "plant_name"

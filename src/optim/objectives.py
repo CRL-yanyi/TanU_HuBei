@@ -43,11 +43,14 @@ def set_thermal_cost_objective(
                 raise KeyError(f"Missing thermal shutdown variable: {key}")
 
             # 1.2 发电成本：linearCost * P_g,t * Δt
-            variable_cost += linear_cost * step_hours * variables.power[key]
+            if abs(linear_cost) > 1e-9:
+                variable_cost.add_affine_term(variables.power[key], linear_cost * step_hours)
             # 1.3 启动成本：startUpCost * v_g,t
-            startup_cost += startup_unit_cost * variables.startup[key]
+            if abs(startup_unit_cost) > 1e-9:
+                startup_cost.add_affine_term(variables.startup[key], startup_unit_cost)
             # 1.4 停机成本：shutDownCost * w_g,t
-            shutdown_cost += shutdown_unit_cost * variables.shutdown[key]
+            if abs(shutdown_unit_cost) > 1e-9:
+                shutdown_cost.add_affine_term(variables.shutdown[key], shutdown_unit_cost)
 
     # 2. 总目标：min 发电成本 + 启动成本 + 停机成本
     total_cost = variable_cost + startup_cost + shutdown_cost

@@ -41,6 +41,11 @@ def test_data_loading_and_slicing():
     assert not case_data.thermal_units.empty
     assert not case_data.storage_units.empty
     
+    # 检验 Scheme B 新增的容量规格表
+    assert case_data.load_spec is not None and not case_data.load_spec.empty
+    assert case_data.wind_spec is not None and not case_data.wind_spec.empty
+    assert case_data.pv_spec is not None and not case_data.pv_spec.empty
+    
     # 检验曲线数据长度
     assert len(case_data.load_curves) == 24
     assert len(case_data.wind_curves) == 24

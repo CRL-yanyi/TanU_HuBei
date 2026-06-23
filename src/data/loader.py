@@ -364,7 +364,9 @@ def load_case(case_config_path: str, time_config: TimeConfig = None, scenario: i
     metadata = {
         'case_config_path': case_config_path,
         'loaded_hours': len(load_curves),
-        'scenario': scenario
+        'scenario': scenario,
+        'dc_target_zones': config.dc_flows_config.get('target_zones', {}),
+        'dc_capacities': config.dc_flows_config.get('capacities', {})
     }
 
     return CaseData(

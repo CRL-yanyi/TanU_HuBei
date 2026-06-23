@@ -6,7 +6,7 @@ scenario: 0                 # 选用多场景数据组编号 (0-9)，0 对应基
 simulation:
   mode: "UC"                # UC (机组组合，优化状态) 或 ED (经济调度，固定状态)
   start_hour: 0             # 运行起始小时 (0 - 8759)
-  end_hour: 8759              # 运行结束小时 (0 - 8759)
+  end_hour: 23              # 运行结束小时 (0 - 8759)
   step_hours: 1.0           # 仿真时间步长 (小时)
 
 solver:
@@ -27,3 +27,6 @@ switches:
   curtailment_penalty_wind: 500.0  # 弃风惩罚费用 (元/MWh)
   curtailment_penalty_pv: 500.0    # 弃光惩罚费用 (元/MWh)
   load_shed_penalty: 100000.0      # 失负荷惩罚费用 (元/MWh)
+  default_load_reserve_rate: 0.03        # 默认负荷备用率
+  default_contingency_reserve_rate: 0.02  # 默认事故备用率
+  default_spinning_reserve_rate: 0.5     # 默认旋转备用分配比例

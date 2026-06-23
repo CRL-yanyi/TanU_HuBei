@@ -100,6 +100,10 @@ class RunConfig:
         self.curtailment_penalty_pv = float(sw.get("curtailment_penalty_pv", 500.0))
         self.load_shed_penalty = float(sw.get("load_shed_penalty", 100000.0))
 
+        self.default_load_reserve_rate = float(sw.get("default_load_reserve_rate", 0.03))
+        self.default_contingency_reserve_rate = float(sw.get("default_contingency_reserve_rate", 0.02))
+        self.default_spinning_reserve_rate = float(sw.get("default_spinning_reserve_rate", 0.5))
+
 
 def load_run_config(config_path: str) -> RunConfig:
     with open(config_path, 'r', encoding='utf-8') as f:

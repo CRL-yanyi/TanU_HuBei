@@ -460,6 +460,8 @@ def _add_wind_resources(grid: Grid, case_data) -> None:
             Pmin=0.0,
         )
         wind.monthly_capacities = monthly_caps
+        # 自动挂接时序容量系数 (TSCapacity)
+        wind.TSCapacity = {t: float(case_data.wind_curves.at[t, zone_name]) for t in case_data.wind_curves.index}
 
         grid.addResource(wind)
 
@@ -497,6 +499,8 @@ def _add_pv_resources(grid: Grid, case_data) -> None:
             Pmin=0.0,
         )
         pv.monthly_capacities = monthly_caps
+        # 自动挂接时序容量系数 (TSCapacity)
+        pv.TSCapacity = {t: float(case_data.pv_curves.at[t, zone_name]) for t in case_data.pv_curves.index}
 
         grid.addResource(pv)
 

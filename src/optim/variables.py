@@ -235,3 +235,36 @@ def add_renewable_variables(
         power=power,
         curtailment=curtailment,
     )
+
+
+@dataclass
+class LoadShedVariables:
+    """失负荷惩罚决策变量集合。"""
+
+    load_shed: dict[VariableKey, Any]
+
+
+def add_load_shed_variables(
+    model: Any,
+    zone_ids: Iterable[str],
+    periods: Iterable[Hashable],
+) -> LoadShedVariables:
+    """创建分区失负荷惩罚变量。"""
+
+    zone_ids = tuple(zone_ids)
+    periods = tuple(periods)
+
+    keys = [
+        (zone_id, period)
+        for zone_id in zone_ids
+        for period in periods
+    ]
+
+    load_shed = model.add_variables(
+        keys,
+        lb=0.0,
+        domain=poi.VariableDomain.Continuous,
+        name="load_shed",
+    )
+
+    return LoadShedVariables(load_shed=load_shed)

@@ -9,6 +9,7 @@ def add_storage_constraints(
     grid: Grid,
     variables: StorageVariables,
     periods: Iterable[Hashable],
+    initial_energy: dict[str, float] = None,
 ) -> dict[str, Any]:
     """添加储能与抽水蓄能充放电、电量平衡和状态约束。"""
     periods_list = list(periods)
@@ -25,7 +26,11 @@ def add_storage_constraints(
         e_min = storage.Emin  # 0.0
         eff_c = storage.effC  # 充电效率
         eff_d = storage.effD  # 放电效率
-        e0 = storage.E0        # 初始能量
+        
+        if initial_energy is not None and s_id in initial_energy:
+            e0 = initial_energy[s_id]
+        else:
+            e0 = storage.E0        # 初始能量
 
         for idx, t in enumerate(periods_list):
             v_charge = variables.charge_power[s_id, t]

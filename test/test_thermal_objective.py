@@ -5,7 +5,7 @@ from pyoptinterface import gurobi
 from src.model.grid import Grid
 from src.model.resource import Thermal
 from src.model.zone import Zone
-from src.optim.objectives import set_thermal_cost_objective
+from src.optim.objectives import set_grid_objective
 from src.optim.variables import add_thermal_variables
 
 
@@ -25,7 +25,7 @@ def make_grid():
     return grid
 
 
-def test_set_thermal_cost_objective():
+def test_set_grid_objective():
     model = gurobi.Model()
     grid = make_grid()
     variables = add_thermal_variables(model, ["G1"], [0])
@@ -34,21 +34,20 @@ def test_set_thermal_cost_objective():
     model.add_linear_constraint(variables.startup["G1", 0], poi.Eq, 1.0)
     model.add_linear_constraint(variables.shutdown["G1", 0], poi.Eq, 1.0)
 
-    expressions = set_thermal_cost_objective(
+    expressions = set_grid_objective(
         model=model,
         grid=grid,
-        variables=variables,
+        thermal_vars=variables,
         periods=[0],
     )
 
     model.optimize()
 
-    assert set(expressions) == {
-        "variable_cost",
-        "startup_cost",
-        "shutdown_cost",
-        "total_cost",
-    }
+    assert "variable_cost" in expressions
+    assert "startup_cost" in expressions
+    assert "shutdown_cost" in expressions
+    assert "total_cost" in expressions
+    
     objective_value = model.get_model_attribute(poi.ModelAttribute.ObjectiveValue)
     assert objective_value == pytest.approx(80.0)
 
@@ -59,10 +58,10 @@ def test_reject_non_positive_step_hours():
     variables = add_thermal_variables(model, ["G1"], [0])
 
     with pytest.raises(ValueError, match="step_hours"):
-        set_thermal_cost_objective(
+        set_grid_objective(
             model=model,
             grid=grid,
-            variables=variables,
+            thermal_vars=variables,
             periods=[0],
             step_hours=0,
         )

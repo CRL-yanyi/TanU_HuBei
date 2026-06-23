@@ -8,7 +8,7 @@ from src.model.zone import Zone
 from src.optim.constraints.power_balance import add_power_balance_constraints
 from src.optim.constraints.reserve import add_system_reserve_constraints
 from src.optim.constraints.thermal import add_thermal_uc_constraints
-from src.optim.objectives import set_thermal_cost_objective
+from src.optim.objectives import set_grid_objective
 from src.optim.variables import add_thermal_variables
 
 
@@ -101,11 +101,11 @@ def test_two_unit_three_period_uc():
         reserve_requirement_mw={0: 20.0, 1: 20.0, 2: 20.0},
     )
 
-    set_thermal_cost_objective(
+    set_grid_objective(
         model=model,
         grid=grid,
-        variables=variables,
         periods=periods,
+        thermal_vars=variables,
     )
 
     model.optimize()

@@ -26,8 +26,8 @@ def add_transmission_constraints(
         if capacity_from < 0.0 or capacity_to < 0.0:
             raise ValueError(f"Invalid transmission limits for {line.id}")
 
-        flow_min = -capacity_from
-        flow_max = capacity_to
+        flow_min = -capacity_from#反方向最大容量
+        flow_max = capacity_to#正方向最大容量。
 
         # 1.1 断面停运时强制潮流为 0
         if getattr(line, "status", 1) == 0:

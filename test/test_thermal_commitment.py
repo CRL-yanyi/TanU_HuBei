@@ -1,15 +1,20 @@
+import pandas as pd
 import pyoptinterface as poi
 import pytest
-from pyoptinterface import gurobi
 
 from src.model.grid import Grid
 from src.model.resource import Thermal
 from src.model.zone import Zone
 from src.optim.constraints.thermal import add_thermal_uc_constraints
+from src.optim.opt_model import OptModel
 from src.optim.variables import add_thermal_variables
 
 
-def make_grid():
+def make_periods(count=1):
+    return pd.date_range("2026-01-01 00:00", periods=count, freq="h")
+
+
+def make_grid(initial_on: int):
     grid = Grid(id="TEST")
     grid.addZone(Zone(id="Z1"))
     unit = Thermal(
@@ -22,6 +27,8 @@ def make_grid():
         rampDown=100.0,
         minON=0,
         minOFF=0,
+        initT=1 if initial_on == 1 else -1,
+        initialPower=10.0 if initial_on == 1 else 0.0,
     )
     unit.startUpCapacity = 100.0
     unit.shutDownCapacity = 100.0
@@ -30,29 +37,28 @@ def make_grid():
 
 
 def solve_transition(initial_on: int, target_on: int):
-    model = gurobi.Model()
-    grid = make_grid()
-    variables = add_thermal_variables(model, ["G1"], [0])
+    opt_model = OptModel()
+    grid = make_grid(initial_on)
+    periods = make_periods()
+    t0 = periods[0]
+    add_thermal_variables(opt_model, grid, periods)
 
-    add_thermal_uc_constraints(
-        model=model,
-        grid=grid,
-        variables=variables,
-        periods=[0],
-        initial_on={"G1": initial_on},
-        initial_power_mw={"G1": 0.0 if initial_on == 0 else 10.0},
-    )
+    add_thermal_uc_constraints(opt_model=opt_model, grid=grid, periods=periods)
 
-    model.add_linear_constraint(variables.is_on["G1", 0], poi.Eq, target_on)
-    model.set_objective(
-        variables.startup["G1", 0] + variables.shutdown["G1", 0],
+    is_on = opt_model.vars["thermal_is_on"]
+    startup = opt_model.vars["thermal_startup"]
+    shutdown = opt_model.vars["thermal_shutdown"]
+
+    opt_model.model.add_linear_constraint(is_on["G1", t0], poi.Eq, target_on)
+    opt_model.model.set_objective(
+        startup["G1", t0] + shutdown["G1", t0],
         poi.ObjectiveSense.Minimize,
     )
-    model.optimize()
+    opt_model.optimize()
 
     return (
-        model.get_value(variables.startup["G1", 0]),
-        model.get_value(variables.shutdown["G1", 0]),
+        opt_model.get_value(startup["G1", t0]),
+        opt_model.get_value(shutdown["G1", t0]),
     )
 
 
@@ -77,16 +83,12 @@ def test_commitment_transition(
     assert shutdown == pytest.approx(expected_shutdown)
 
 
-def test_reject_invalid_initial_state():
-    model = gurobi.Model()
-    grid = make_grid()
-    variables = add_thermal_variables(model, ["G1"], [0])
+def test_reject_nonzero_power_when_initially_off():
+    opt_model = OptModel()
+    grid = make_grid(initial_on=0)
+    grid.getResFromId("G1").initialPower = 10.0
+    periods = make_periods()
+    add_thermal_variables(opt_model, grid, periods)
 
-    with pytest.raises(ValueError, match="must be 0 or 1"):
-        add_thermal_uc_constraints(
-            model=model,
-            grid=grid,
-            variables=variables,
-            periods=[0],
-            initial_on={"G1": 2},
-        )
+    with pytest.raises(ValueError, match="Initial power must be 0"):
+        add_thermal_uc_constraints(opt_model=opt_model, grid=grid, periods=periods)

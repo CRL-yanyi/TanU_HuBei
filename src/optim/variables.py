@@ -9,24 +9,10 @@ import pyoptinterface as poi
 VariableKey = tuple[str, Hashable]
 
 
-@dataclass
-class ThermalVariables:
-    """火电机组组合变量集合。"""
+def add_thermal_variables(opt_model, grid, periods):
+    """Create thermal variables directly on opt_model.vars."""
 
-    power: dict[VariableKey, Any]
-    is_on: dict[VariableKey, Any]
-    startup: dict[VariableKey, Any]
-    shutdown: dict[VariableKey, Any]
-
-
-def add_thermal_variables(
-    model: Any,
-    unit_ids: Iterable[str],
-    periods: Iterable[Hashable],
-) -> ThermalVariables:
-    """创建火电出力、开机、启动和停机变量。"""
-
-    unit_ids = tuple(unit_ids)
+    unit_ids = tuple(grid.getResIdListFromType("THERMAL"))
     periods = tuple(periods)
 
     if len(unit_ids) != len(set(unit_ids)):
@@ -35,45 +21,40 @@ def add_thermal_variables(
     if len(periods) != len(set(periods)):
         raise ValueError("时间索引不能重复")
 
-    # 1. 火电变量索引统一为 (机组ID, 时段)，便于后续约束按同一键取变量
     keys = [
         (unit_id, period)
         for unit_id in unit_ids
         for period in periods
     ]
 
-    # 1.1 火电出力变量：P_g,t >= 0
-    power = model.add_variables(
+    opt_model.add_var_group(
+        "thermal_power",
         keys,
         lb=0.0,
         domain=poi.VariableDomain.Continuous,
         name="thermal_power",
     )
-    # 1.2 开机状态变量：u_g,t ∈ {0, 1}
-    is_on = model.add_variables(
+    opt_model.add_var_group(
+        "thermal_is_on",
         keys,
         domain=poi.VariableDomain.Binary,
         name="thermal_is_on",
     )
-    # 1.3 启动状态变量：v_g,t ∈ {0, 1}
-    startup = model.add_variables(
+    opt_model.add_var_group(
+        "thermal_startup",
         keys,
         domain=poi.VariableDomain.Binary,
         name="thermal_startup",
     )
-    # 1.4 停机状态变量：w_g,t ∈ {0, 1}
-    shutdown = model.add_variables(
+    opt_model.add_var_group(
+        "thermal_shutdown",
         keys,
         domain=poi.VariableDomain.Binary,
         name="thermal_shutdown",
     )
 
-    return ThermalVariables(
-        power=power,
-        is_on=is_on,
-        startup=startup,
-        shutdown=shutdown,
-    )
+
+
 @dataclass
 class TransmissionVariables:
     """区域间可控输电断面变量集合。"""
@@ -97,14 +78,12 @@ def add_transmission_variables(
     if len(periods) != len(set(periods)):
         raise ValueError("时间索引不能重复")
 
-    # 2. 输电断面变量索引统一为 (断面ID, 时段)
     keys = [
         (line_id, period)
         for line_id in line_ids
         for period in periods
     ]
 
-    # 2.1 断面潮流变量：上下限由 transmission 约束按 Grid 参数设置
     flow = model.add_variables(
         keys,
         lb=-math.inf,
@@ -145,7 +124,12 @@ def add_hydro_variables(
         for period in periods
     ]
 
-    power = model.add_variables(keys, lb=0.0, domain=poi.VariableDomain.Continuous, name="hydro_power",)
+    power = model.add_variables(
+        keys,
+        lb=0.0,
+        domain=poi.VariableDomain.Continuous,
+        name="hydro_power",
+    )
 
     return HydroVariables(power=power)
 
@@ -161,7 +145,12 @@ class StorageVariables:
     is_discharging: dict[VariableKey, Any]
 
 
-def add_storage_variables(model: Any, unit_ids: Iterable[str], periods: Iterable[Hashable], relax_binary: bool = False,) -> StorageVariables:
+def add_storage_variables(
+    model: Any,
+    unit_ids: Iterable[str],
+    periods: Iterable[Hashable],
+    relax_binary: bool = False,
+) -> StorageVariables:
     """创建储能及抽蓄决策变量。"""
 
     unit_ids = tuple(unit_ids)
@@ -179,15 +168,43 @@ def add_storage_variables(model: Any, unit_ids: Iterable[str], periods: Iterable
         for period in periods
     ]
 
-    charge_power = model.add_variables(keys, lb=0.0, domain=poi.VariableDomain.Continuous, name="storage_charge",)
-    discharge_power = model.add_variables(keys, lb=0.0, domain=poi.VariableDomain.Continuous, name="storage_discharge",)
-    energy = model.add_variables(keys, lb=0.0, domain=poi.VariableDomain.Continuous, name="storage_energy",)
+    charge_power = model.add_variables(
+        keys,
+        lb=0.0,
+        domain=poi.VariableDomain.Continuous,
+        name="storage_charge",
+    )
+    discharge_power = model.add_variables(
+        keys,
+        lb=0.0,
+        domain=poi.VariableDomain.Continuous,
+        name="storage_discharge",
+    )
+    energy = model.add_variables(
+        keys,
+        lb=0.0,
+        domain=poi.VariableDomain.Continuous,
+        name="storage_energy",
+    )
 
-    # 充放电转化为松弛变量提高求解效率
-    state_domain = (poi.VariableDomain.Continuous if relax_binary else poi.VariableDomain.Binary)
+    state_domain = (
+        poi.VariableDomain.Continuous if relax_binary else poi.VariableDomain.Binary
+    )
 
-    is_charging = model.add_variables(keys, lb=0.0, ub=1.0, domain=state_domain, name="storage_is_charging",)
-    is_discharging = model.add_variables(keys, lb=0.0, ub=1.0, domain=state_domain, name="storage_is_discharging",)
+    is_charging = model.add_variables(
+        keys,
+        lb=0.0,
+        ub=1.0,
+        domain=state_domain,
+        name="storage_is_charging",
+    )
+    is_discharging = model.add_variables(
+        keys,
+        lb=0.0,
+        ub=1.0,
+        domain=state_domain,
+        name="storage_is_discharging",
+    )
 
     return StorageVariables(
         charge_power=charge_power,
@@ -211,7 +228,7 @@ def add_renewable_variables(
     unit_ids: Iterable[str],
     periods: Iterable[Hashable],
 ) -> RenewableVariables:
-    """创建新能源机组的出力与弃电变量。"""
+    """创建新能源机组出力与弃电变量。"""
 
     unit_ids = tuple(unit_ids)
     periods = tuple(periods)
@@ -228,8 +245,18 @@ def add_renewable_variables(
         for period in periods
     ]
 
-    power = model.add_variables(keys, lb=0.0, domain=poi.VariableDomain.Continuous, name="renewable_power", )
-    curtailment = model.add_variables(keys, lb=0.0, domain=poi.VariableDomain.Continuous, name="renewable_curtailment", )
+    power = model.add_variables(
+        keys,
+        lb=0.0,
+        domain=poi.VariableDomain.Continuous,
+        name="renewable_power",
+    )
+    curtailment = model.add_variables(
+        keys,
+        lb=0.0,
+        domain=poi.VariableDomain.Continuous,
+        name="renewable_curtailment",
+    )
 
     return RenewableVariables(
         power=power,

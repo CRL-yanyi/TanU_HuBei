@@ -7,19 +7,19 @@ import pyoptinterface as poi
 from src.model.grid import Grid
 
 
-VariableKey = tuple[str, Hashable]
-BalanceKey = tuple[str, Hashable]
+VariableKey = tuple[str, Hashable]#资源变量或输电变量
+BalanceKey = tuple[str, Hashable]#分区需求
 
 
 def add_power_balance_constraints(
     model: Any,
     grid: Grid,
     periods: Iterable[Hashable],
-    demand_mw: Mapping[BalanceKey, float],
-    supply_groups: Sequence[Mapping[str, Any]] = (),
-    demand_groups: Sequence[Mapping[str, Any]] = (),
-    transmission_flow: Mapping[VariableKey, Any] | None = None,
-    fixed_external_injection_mw: Mapping[BalanceKey, float] | None = None,
+    demand_mw: Mapping[BalanceKey, float],#每个分区每个时段的负荷。
+    supply_groups: Sequence[Mapping[str, Any]] = (),#供给侧资源组，例如火电、水电、新能源出力。
+    demand_groups: Sequence[Mapping[str, Any]] = (),#需求侧资源组，例如储能充电。
+    transmission_flow: Mapping[VariableKey, Any] | None = None,#断面潮流变量
+    fixed_external_injection_mw: Mapping[BalanceKey, float] | None = None,#外部固定注入
 ) -> dict[str, Any]:
     """添加分区功率平衡约束，按 Grid 分区和跨区断面组织表达式。"""
 
@@ -35,8 +35,8 @@ def add_power_balance_constraints(
             if key not in demand_mw:
                 raise ValueError(f"Missing zonal demand: {key}")
 
-            demand = float(demand_mw[key])
-            injection = float(fixed_external_injection_mw.get(key, 0.0))
+            demand = float(demand_mw[key])#必须有限且非负。
+            injection = float(fixed_external_injection_mw.get(key, 0.0))#必须有限，但允许正负。
             if not math.isfinite(demand) or demand < 0.0:
                 raise ValueError(f"Demand must be finite and nonnegative: {key}")
             if not math.isfinite(injection):
@@ -86,11 +86,11 @@ def _sum_group_for_zone(
     # 2. 资源组按 resource_zones 过滤，只汇总属于当前分区的变量
     variables = group["variables"]
     resource_zones = group["resource_zones"]
-    coefficient = float(group.get("coefficient", 1.0))
+    coefficient = float(group.get("coefficient", 1.0))#可选系数，默认1.0
 
     expr = poi.ExprBuilder()
     for resource_id, resource_zone in resource_zones.items():
-        if resource_zone != zone_id:
+        if resource_zone != zone_id:#只保留属于当前 zone_id 的资源。
             continue
 
         key = (resource_id, period)

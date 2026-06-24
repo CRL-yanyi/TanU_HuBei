@@ -27,6 +27,8 @@ class Thermal(Resource):
     minON: int = 0             # 最小开机时间，单位小时
     minOFF: int = 0            # 最小停机时间，单位小时
     initT: int = 0             # 初始开停机持续时间
+    initialPower: float | None = None
+    ONOFF: dict = field(default_factory=dict)
     fuelType: str = "COAL"
 
     # 对齐成员一 loader 处理后的火电变动成本，单位 元/MWh。

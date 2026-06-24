@@ -1,12 +1,17 @@
+import pandas as pd
 import pyoptinterface as poi
 import pytest
-from pyoptinterface import gurobi
 
 from src.model.grid import Grid
 from src.model.resource import Thermal
 from src.model.zone import Zone
 from src.optim.constraints.thermal import add_thermal_uc_constraints
+from src.optim.opt_model import OptModel
 from src.optim.variables import add_thermal_variables
+
+
+def make_periods(count=1, freq="h"):
+    return pd.date_range("2026-01-01 00:00", periods=count, freq=freq)
 
 
 def build_ramp_model(
@@ -18,7 +23,7 @@ def build_ramp_model(
     startup_ramp=40.0,
     shutdown_ramp=40.0,
 ):
-    model = gurobi.Model()
+    opt_model = OptModel()
     grid = Grid(id="TEST")
     grid.addZone(Zone(id="Z1"))
     unit = Thermal(
@@ -31,88 +36,97 @@ def build_ramp_model(
         rampDown=ramp_down,
         minON=0,
         minOFF=0,
+        initT=1 if initial_on == 1 else -1,
+        initialPower=initial_power,
     )
     unit.startUpCapacity = startup_ramp
     unit.shutDownCapacity = shutdown_ramp
     grid.addResource(unit)
 
-    variables = add_thermal_variables(model, ["G1"], periods)
-    add_thermal_uc_constraints(
-        model=model,
-        grid=grid,
-        variables=variables,
-        periods=periods,
-        initial_on={"G1": initial_on},
-        initial_power_mw={"G1": initial_power},
-    )
+    add_thermal_variables(opt_model, grid, periods)
+    add_thermal_uc_constraints(opt_model=opt_model, grid=grid, periods=periods)
 
-    return model, variables
+    return opt_model
 
 
 def test_normal_ramp_up_limit():
-    model, variables = build_ramp_model([0], initial_on=1, initial_power=50.0)
+    periods = make_periods()
+    t0 = periods[0]
+    opt_model = build_ramp_model(periods, initial_on=1, initial_power=50.0)
+    is_on = opt_model.vars["thermal_is_on"]
+    power = opt_model.vars["thermal_power"]
 
-    model.add_linear_constraint(variables.is_on["G1", 0], poi.Eq, 1)
-    model.set_objective(-variables.power["G1", 0], poi.ObjectiveSense.Minimize)
-    model.optimize()
+    opt_model.model.add_linear_constraint(is_on["G1", t0], poi.Eq, 1)
+    opt_model.model.set_objective(-power["G1", t0], poi.ObjectiveSense.Minimize)
+    opt_model.optimize()
 
-    assert model.get_value(variables.power["G1", 0]) == pytest.approx(70.0)
+    assert opt_model.get_value(power["G1", t0]) == pytest.approx(70.0)
 
 
 def test_normal_ramp_down_limit():
-    model, variables = build_ramp_model([0], initial_on=1, initial_power=50.0)
+    periods = make_periods()
+    t0 = periods[0]
+    opt_model = build_ramp_model(periods, initial_on=1, initial_power=50.0)
+    is_on = opt_model.vars["thermal_is_on"]
+    power = opt_model.vars["thermal_power"]
 
-    model.add_linear_constraint(variables.is_on["G1", 0], poi.Eq, 1)
-    model.set_objective(variables.power["G1", 0], poi.ObjectiveSense.Minimize)
-    model.optimize()
+    opt_model.model.add_linear_constraint(is_on["G1", t0], poi.Eq, 1)
+    opt_model.model.set_objective(power["G1", t0], poi.ObjectiveSense.Minimize)
+    opt_model.optimize()
 
-    assert model.get_value(variables.power["G1", 0]) == pytest.approx(30.0)
+    assert opt_model.get_value(power["G1", t0]) == pytest.approx(30.0)
 
 
 def test_startup_ramp_limit():
-    model, variables = build_ramp_model(
-        [0],
+    periods = make_periods()
+    t0 = periods[0]
+    opt_model = build_ramp_model(
+        periods,
         initial_on=0,
         initial_power=0.0,
         startup_ramp=40.0,
     )
+    is_on = opt_model.vars["thermal_is_on"]
+    power = opt_model.vars["thermal_power"]
+    startup = opt_model.vars["thermal_startup"]
 
-    model.add_linear_constraint(variables.is_on["G1", 0], poi.Eq, 1)
-    model.set_objective(-variables.power["G1", 0], poi.ObjectiveSense.Minimize)
-    model.optimize()
+    opt_model.model.add_linear_constraint(is_on["G1", t0], poi.Eq, 1)
+    opt_model.model.set_objective(-power["G1", t0], poi.ObjectiveSense.Minimize)
+    opt_model.optimize()
 
-    assert model.get_value(variables.power["G1", 0]) == pytest.approx(40.0)
-    assert model.get_value(variables.startup["G1", 0]) == pytest.approx(1.0)
+    assert opt_model.get_value(power["G1", t0]) == pytest.approx(40.0)
+    assert opt_model.get_value(startup["G1", t0]) == pytest.approx(1.0)
 
 
 def test_shutdown_ramp_allows_shutdown():
-    model, variables = build_ramp_model(
-        [0],
+    periods = make_periods()
+    t0 = periods[0]
+    opt_model = build_ramp_model(
+        periods,
         initial_on=1,
         initial_power=40.0,
         shutdown_ramp=40.0,
     )
+    is_on = opt_model.vars["thermal_is_on"]
+    power = opt_model.vars["thermal_power"]
+    shutdown = opt_model.vars["thermal_shutdown"]
 
-    model.add_linear_constraint(variables.is_on["G1", 0], poi.Eq, 0)
-    model.optimize()
+    opt_model.model.add_linear_constraint(is_on["G1", t0], poi.Eq, 0)
+    opt_model.optimize()
 
-    assert model.get_value(variables.power["G1", 0]) == pytest.approx(0.0)
-    assert model.get_value(variables.shutdown["G1", 0]) == pytest.approx(1.0)
+    assert opt_model.get_value(power["G1", t0]) == pytest.approx(0.0)
+    assert opt_model.get_value(shutdown["G1", t0]) == pytest.approx(1.0)
 
 
-def test_reject_nonzero_power_when_initially_off():
-    model = gurobi.Model()
-    grid = Grid(id="TEST")
-    grid.addZone(Zone(id="Z1"))
-    grid.addResource(Thermal(id="G1", zoneId="Z1", type="THERMAL", Pmax=100.0))
-    variables = add_thermal_variables(model, ["G1"], [0])
+def test_datetime_index_infers_ramp_step_hours():
+    periods = make_periods(2, freq="30min")
+    t0 = periods[0]
+    opt_model = build_ramp_model(periods, initial_on=1, initial_power=50.0)
+    is_on = opt_model.vars["thermal_is_on"]
+    power = opt_model.vars["thermal_power"]
 
-    with pytest.raises(ValueError, match="Initial power must be 0"):
-        add_thermal_uc_constraints(
-            model=model,
-            grid=grid,
-            variables=variables,
-            periods=[0],
-            initial_on={"G1": 0},
-            initial_power_mw={"G1": 10.0},
-        )
+    opt_model.model.add_linear_constraint(is_on["G1", t0], poi.Eq, 1)
+    opt_model.model.set_objective(-power["G1", t0], poi.ObjectiveSense.Minimize)
+    opt_model.optimize()
+
+    assert opt_model.get_value(power["G1", t0]) == pytest.approx(60.0)

@@ -5,20 +5,18 @@ from typing import Any, Hashable, Iterable, Mapping
 import pyoptinterface as poi
 
 from src.model.grid import Grid
-from src.optim.variables import ThermalVariables
+from src.optim.opt_model import OptModel
 
 
 def add_system_reserve_constraints(
-    model: Any,
+    opt_model: OptModel,
     grid: Grid,
-    variables: ThermalVariables,
     periods: Iterable[Hashable],
     reserve_requirement_mw: Mapping[Hashable, float],
 ) -> dict[str, Any]:
-    """添加系统旋转备用约束，备用来自在线火电剩余容量。"""
+    """Add spinning reserve constraints from online thermal spare capacity."""
 
     constraints: dict[str, Any] = {}
-    # 1. 当前备用只统计火电：Pmax * u_g,t - P_g,t
     thermal_units = tuple(grid.getResListFromType("THERMAL"))
 
     for period in periods:
@@ -33,16 +31,16 @@ def add_system_reserve_constraints(
 
         reserve_expr = poi.ExprBuilder()
 
-        # 1.1 汇总所有在线火电机组的可上调容量
         for unit in thermal_units:
             key = (unit.id, period)
-            if key not in variables.power or key not in variables.is_on:
-                raise KeyError(f"Missing thermal variable: {key}")
+            reserve_expr += (
+                unit.Pmax * opt_model.get_var("thermal_is_on", key)
+                - opt_model.get_var("thermal_power", key)
+            )
 
-            reserve_expr += unit.Pmax * variables.is_on[key] - variables.power[key]
-
-        # 1.2 系统备用约束：sum(Pmax * u - P) >= R_t
-        constraints[f"system_reserve_{period}"] = model.add_linear_constraint(
+        constraint_key = f"system_reserve_{period}"
+        constraints[constraint_key] = opt_model.add_linear_constraint(
+            constraint_key,
             reserve_expr,
             poi.Geq,
             requirement,

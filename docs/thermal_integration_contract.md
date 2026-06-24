@@ -4,7 +4,7 @@
 
 本文说明成员 2、4、5 如何调用成员 3 提供的火电 UC、系统平衡、输电、备用和成本模块。
 
-优化层只接收规范参数，不读取 Excel、不保存结果、不负责创建 `Grid`。
+优化层直接接收规范化后的 `Grid` 对象，不读取 Excel、不保存结果、不负责创建 `Grid`。
 
 ## 2. 当前实现
 
@@ -12,9 +12,9 @@
 |---|---|---|
 | 火电变量 | `src/optim/variables.py` | `add_thermal_variables` |
 | 输电变量 | `src/optim/variables.py` | `add_transmission_variables` |
-| 火电约束 | `src/optim/constraints/thermal.py` | 容量、启停、最小开停机、爬坡 |
+| 火电约束 | `src/optim/constraints/thermal.py` | `add_thermal_uc_constraints` / `add_thermal_ed_constraints` |
 | 功率平衡 | `src/optim/constraints/power_balance.py` | `add_power_balance_constraints` |
-| 断面限制 | `src/optim/constraints/transmission.py` | `add_transmission_limit_constraints` |
+| 断面限制 | `src/optim/constraints/transmission.py` | `add_transmission_constraints` |
 | 系统备用 | `src/optim/constraints/reserve.py` | `add_system_reserve_constraints` |
 | 火电成本 | `src/optim/objectives.py` | `set_thermal_cost_objective` |
 
@@ -54,10 +54,10 @@
 水电、风电、光伏、储能放电和负荷损失变量作为 supply_groups 接入；储能充电、抽水及其他附加用电作为 demand_groups 接入。
 
 ```python
-ZonalVariableGroup(
-    variables=resource_power,
-    resource_zones=resource_zones,
-)
+{
+    "variables": resource_power,
+    "resource_zones": resource_zones,
+}
 ```
 
 符号约定：

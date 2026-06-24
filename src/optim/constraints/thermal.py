@@ -1,329 +1,339 @@
 # -*- coding: utf-8 -*-
 import math
-from typing import Any, Hashable, Iterable, Mapping
+from collections.abc import Mapping, Sequence
 
+import pandas as pd
 import pyoptinterface as poi
 
-from src.model.grid import Grid
-from src.optim.variables import ThermalVariables
+
+THERMAL_POWER = "thermal_power"
+THERMAL_IS_ON = "thermal_is_on"
+THERMAL_STARTUP = "thermal_startup"
+THERMAL_SHUTDOWN = "thermal_shutdown"
 
 
-ConstraintKey = tuple[str, Hashable]
+def add_thermal_uc_constraints(opt_model, grid, periods):
+    """添加火电机组组合常规约束。"""
+    add_thermal_output_limit_constraints(opt_model, grid, periods)
+    add_thermal_state_transition_constraints(opt_model, grid, periods)
+    add_thermal_start_stop_exclusion_constraints(opt_model, grid, periods)
+    add_thermal_minimum_time_constraints(opt_model, grid, periods)
+    add_thermal_ramp_constraints(opt_model, grid, periods)
 
 
-def add_thermal_uc_constraints(
-    model: Any,
-    grid: Grid,
-    variables: ThermalVariables,
-    periods: Iterable[Hashable],
-    initial_on: Mapping[str, int] | None = None,
-    initial_power_mw: Mapping[str, float] | None = None,
-    initial_on_hours: Mapping[str, float] | None = None,
-    initial_off_hours: Mapping[str, float] | None = None,
-    step_hours: float = 1.0,
-) -> dict[str, Any]:
-    """添加火电机组组合（UC）约束，启停状态由模型优化决定。"""
+def add_thermal_ed_constraints(opt_model, grid, periods):
+    """添加火电经济调度常规约束，固定状态来自 Thermal.ONOFF。"""
+    add_thermal_fixed_status_constraints(opt_model, grid, periods)
+    add_thermal_ed_output_limit_constraints(opt_model, grid, periods)
+    add_thermal_ed_ramp_constraints(opt_model, grid, periods)
 
-    _require_positive_step(step_hours)
-    periods = tuple(periods)
-    constraints: dict[str, Any] = {}
 
-    # 1. 遍历 Grid 中所有火电机组，逐机组、逐时段建立物理约束
+def add_thermal_output_limit_constraints(opt_model, grid, periods):
+    """Pmin * u[t] <= P[t] <= Pmax * u[t]."""
     for unit in grid.getResListFromType("THERMAL"):
-        unit_id = unit.id
-        # 1.1 读取出力上下限参数：Pmin <= P_g,t <= Pmax
-        p_min = _unit_number(unit, "Pmin")
-        p_max = _unit_number(unit, "Pmax")
-        if p_max < p_min:
-            raise ValueError(f"Invalid output limits for unit {unit_id}")
+        p_min, p_max = _output_limits(unit)
 
-        # 1.2 读取初始开停机状态和初始出力，用于第一个时段的状态转移与爬坡
-        initial_state = _initial_status(unit, initial_on)
-        previous_on: Any = initial_state
-        previous_power: Any = _initial_power(unit, initial_power_mw, initial_state)
-        if previous_on == 0 and previous_power != 0.0:
-            raise ValueError(
-                f"Initial power must be 0 when unit {unit_id} is offline"
+        for t in periods:
+            key = (unit.id, t)
+            pg = opt_model.get_var(THERMAL_POWER, key)
+            ug = opt_model.get_var(THERMAL_IS_ON, key)
+
+            _add_constraint(
+                opt_model,
+                f"thermal_pmin_{unit.id}_{t}",
+                pg - p_min * ug,
+                poi.Geq,
+                0.0,
+                f"thermal_pmin[{unit.id},{t}]",
+            )
+            _add_constraint(
+                opt_model,
+                f"thermal_pmax_{unit.id}_{t}",
+                pg - p_max * ug,
+                poi.Leq,
+                0.0,
+                f"thermal_pmax[{unit.id},{t}]",
             )
 
-        # 1.3 读取常规、启动、停机爬坡能力
+
+def add_thermal_state_transition_constraints(opt_model, grid, periods):
+    """u[t] - u[t-1] = startup[t] - shutdown[t]."""
+    for unit in grid.getResListFromType("THERMAL"):
+        ug_prev = _initial_status(unit)
+
+        for t in periods:
+            key = (unit.id, t)
+            ug = opt_model.get_var(THERMAL_IS_ON, key)
+            vg = opt_model.get_var(THERMAL_STARTUP, key)
+            wg = opt_model.get_var(THERMAL_SHUTDOWN, key)
+
+            _add_constraint(
+                opt_model,
+                f"thermal_state_{unit.id}_{t}",
+                ug - ug_prev - vg + wg,
+                poi.Eq,
+                0.0,
+                f"thermal_state[{unit.id},{t}]",
+            )
+            ug_prev = ug
+
+
+def add_thermal_start_stop_exclusion_constraints(opt_model, grid, periods):
+    """startup[t] + shutdown[t] <= 1."""
+    for unit in grid.getResListFromType("THERMAL"):
+        for t in periods:
+            key = (unit.id, t)
+            vg = opt_model.get_var(THERMAL_STARTUP, key)
+            wg = opt_model.get_var(THERMAL_SHUTDOWN, key)
+
+            _add_constraint(
+                opt_model,
+                f"thermal_start_stop_excl_{unit.id}_{t}",
+                vg + wg,
+                poi.Leq,
+                1.0,
+                f"thermal_start_stop_excl[{unit.id},{t}]",
+            )
+
+
+def add_thermal_minimum_time_constraints(opt_model, grid, periods):
+    """最小开机、最小停机和窗口初始剩余时间约束。"""
+    periods = tuple(periods)
+    step_hours = _period_step_hours(periods)
+
+    for unit in grid.getResListFromType("THERMAL"):
+        _add_minimum_time_constraints_for_unit(opt_model, unit, periods, step_hours)
+
+
+def add_thermal_ramp_constraints(opt_model, grid, periods):
+    """常规爬坡约束，包含启动和停机容量。"""
+    periods = tuple(periods)
+    step_hours = _period_step_hours(periods)
+
+    for unit in grid.getResListFromType("THERMAL"):
+        _, p_max = _output_limits(unit)
         ramp_up = _unit_number(unit, "rampUp")
         ramp_down = _unit_number(unit, "rampDown")
         startup_ramp = _ramp_capacity(unit, "startUpCapacity", p_max)
         shutdown_ramp = _ramp_capacity(unit, "shutDownCapacity", p_max)
 
-        for period in periods:
-            key = (unit_id, period)
-            power = _var(variables.power, key, "thermal power")
-            is_on = _var(variables.is_on, key, "thermal commitment")
-            startup = _var(variables.startup, key, "thermal startup")
-            shutdown = _var(variables.shutdown, key, "thermal shutdown")
+        ug_prev = _initial_status(unit)
+        pg_prev = _initial_power(unit, ug_prev)
+        if ug_prev == 0 and pg_prev != 0.0:
+            raise ValueError(f"Initial power must be 0 when unit {unit.id} is offline")
 
-            # 1.4 出力上下限约束：Pmin * u_g,t <= P_g,t <= Pmax * u_g,t
-            constraints[f"thermal_pmin_{unit_id}_{period}"] = (
-                model.add_linear_constraint(
-                    power - p_min * is_on,
-                    poi.Geq,
-                    0.0,
-                    name=f"thermal_pmin[{unit_id},{period}]",
-                )
-            )
-            constraints[f"thermal_pmax_{unit_id}_{period}"] = (
-                model.add_linear_constraint(
-                    power - p_max * is_on,
-                    poi.Leq,
-                    0.0,
-                    name=f"thermal_pmax[{unit_id},{period}]",
-                )
-            )
+        for t in periods:
+            key = (unit.id, t)
+            pg = opt_model.get_var(THERMAL_POWER, key)
+            ug = opt_model.get_var(THERMAL_IS_ON, key)
+            vg = opt_model.get_var(THERMAL_STARTUP, key)
+            wg = opt_model.get_var(THERMAL_SHUTDOWN, key)
 
-            # 1.5 启停状态转移约束：u_g,t - u_g,t-1 = v_g,t - w_g,t
-            constraints[f"thermal_state_{unit_id}_{period}"] = (
-                model.add_linear_constraint(
-                    is_on - previous_on - startup + shutdown,
-                    poi.Eq,
-                    0.0,
-                    name=f"thermal_state[{unit_id},{period}]",
-                )
+            _add_constraint(
+                opt_model,
+                f"thermal_ramp_up_{unit.id}_{t}",
+                pg - pg_prev - ramp_up * step_hours * ug_prev - startup_ramp * vg,
+                poi.Leq,
+                0.0,
+                f"thermal_ramp_up[{unit.id},{t}]",
             )
-            # 1.6 启动与停机互斥：v_g,t + w_g,t <= 1
-            constraints[f"thermal_start_stop_excl_{unit_id}_{period}"] = (
-                model.add_linear_constraint(
-                    startup + shutdown,
-                    poi.Leq,
-                    1.0,
-                    name=f"thermal_start_stop_excl[{unit_id},{period}]",
-                )
+            _add_constraint(
+                opt_model,
+                f"thermal_ramp_down_{unit.id}_{t}",
+                pg_prev - pg - ramp_down * step_hours * ug - shutdown_ramp * wg,
+                poi.Leq,
+                0.0,
+                f"thermal_ramp_down[{unit.id},{t}]",
             )
 
-            # 1.7 上爬坡约束：P_g,t - P_g,t-1 <= RU * Δt * u_g,t-1 + SUCap * v_g,t
-            constraints[f"thermal_ramp_up_{unit_id}_{period}"] = (
-                model.add_linear_constraint(
-                    power
-                    - previous_power
-                    - ramp_up * step_hours * previous_on
-                    - startup_ramp * startup,
-                    poi.Leq,
-                    0.0,
-                    name=f"thermal_ramp_up[{unit_id},{period}]",
-                )
-            )
-            # 1.8 下爬坡约束：P_g,t-1 - P_g,t <= RD * Δt * u_g,t + SDCap * w_g,t
-            constraints[f"thermal_ramp_down_{unit_id}_{period}"] = (
-                model.add_linear_constraint(
-                    previous_power
-                    - power
-                    - ramp_down * step_hours * is_on
-                    - shutdown_ramp * shutdown,
-                    poi.Leq,
-                    0.0,
-                    name=f"thermal_ramp_down[{unit_id},{period}]",
-                )
-            )
-
-            previous_on = is_on
-            previous_power = power
-
-        # 1.9 最小开机、最小停机和滚动窗口初始剩余时间约束
-        _add_minimum_time_constraints(
-            model=model,
-            variables=variables,
-            constraints=constraints,
-            unit=unit,
-            periods=periods,
-            initial_on=initial_on,
-            initial_on_hours=initial_on_hours,
-            initial_off_hours=initial_off_hours,
-            step_hours=step_hours,
-        )
-
-    return constraints
+            ug_prev = ug
+            pg_prev = pg
 
 
-def add_thermal_ed_constraints(
-    model: Any,
-    grid: Grid,
-    variables: ThermalVariables,
-    periods: Iterable[Hashable],
-    fixed_on: Mapping[ConstraintKey, int],
-    initial_on: Mapping[str, int] | None = None,
-    initial_power_mw: Mapping[str, float] | None = None,
-    step_hours: float = 1.0,
-) -> dict[str, Any]:
-    """添加火电经济调度（ED）约束，启停状态由 fixed_on 固定。"""
-
-    _require_positive_step(step_hours)
-    periods = tuple(periods)
-    constraints: dict[str, Any] = {}
-
-    # 2. ED 中启停状态不再优化，按 fixed_on 固定后只调度出力
+def add_thermal_must_run_constraints(opt_model, grid, periods):
+    """可选约束：mustRun 机组强制开机。"""
     for unit in grid.getResListFromType("THERMAL"):
-        unit_id = unit.id
-        # 2.1 读取火电机组物理参数
-        p_min = _unit_number(unit, "Pmin")
-        p_max = _unit_number(unit, "Pmax")
+        if not bool(getattr(unit, "mustRun", False)):
+            continue
+
+        for t in periods:
+            key = (unit.id, t)
+            ug = opt_model.get_var(THERMAL_IS_ON, key)
+
+            _add_constraint(
+                opt_model,
+                f"thermal_must_run_{unit.id}_{t}",
+                ug,
+                poi.Eq,
+                1.0,
+                f"thermal_must_run[{unit.id},{t}]",
+            )
+
+
+def add_thermal_fixed_status_constraints(opt_model, grid, periods):
+    """ED 固定开停机状态：u/v/w 由 Thermal.ONOFF 决定。"""
+    periods = tuple(periods)
+
+    for unit in grid.getResListFromType("THERMAL"):
+        status_prev = _initial_status(unit)
+
+        for t_idx, t in enumerate(periods):
+            key = (unit.id, t)
+            status = _fixed_status(unit, t, t_idx)
+            startup_status = max(status - status_prev, 0)
+            shutdown_status = max(status_prev - status, 0)
+
+            _add_constraint(
+                opt_model,
+                f"thermal_fixed_on_{unit.id}_{t}",
+                opt_model.get_var(THERMAL_IS_ON, key),
+                poi.Eq,
+                status,
+                f"thermal_fixed_on[{unit.id},{t}]",
+            )
+            _add_constraint(
+                opt_model,
+                f"thermal_fixed_startup_{unit.id}_{t}",
+                opt_model.get_var(THERMAL_STARTUP, key),
+                poi.Eq,
+                startup_status,
+                f"thermal_fixed_startup[{unit.id},{t}]",
+            )
+            _add_constraint(
+                opt_model,
+                f"thermal_fixed_shutdown_{unit.id}_{t}",
+                opt_model.get_var(THERMAL_SHUTDOWN, key),
+                poi.Eq,
+                shutdown_status,
+                f"thermal_fixed_shutdown[{unit.id},{t}]",
+            )
+
+            status_prev = status
+
+
+def add_thermal_ed_output_limit_constraints(opt_model, grid, periods):
+    """ED 出力上下限，开停机状态读取 Thermal.ONOFF。"""
+    periods = tuple(periods)
+
+    for unit in grid.getResListFromType("THERMAL"):
+        p_min, p_max = _output_limits(unit)
+
+        for t_idx, t in enumerate(periods):
+            key = (unit.id, t)
+            status = _fixed_status(unit, t, t_idx)
+            pg = opt_model.get_var(THERMAL_POWER, key)
+
+            _add_constraint(
+                opt_model,
+                f"thermal_pmin_{unit.id}_{t}",
+                pg - p_min * status,
+                poi.Geq,
+                0.0,
+                f"thermal_pmin[{unit.id},{t}]",
+            )
+            _add_constraint(
+                opt_model,
+                f"thermal_pmax_{unit.id}_{t}",
+                pg - p_max * status,
+                poi.Leq,
+                0.0,
+                f"thermal_pmax[{unit.id},{t}]",
+            )
+
+
+def add_thermal_ed_ramp_constraints(opt_model, grid, periods):
+    """ED 爬坡约束，开停机状态读取 Thermal.ONOFF。"""
+    periods = tuple(periods)
+    step_hours = _period_step_hours(periods)
+
+    for unit in grid.getResListFromType("THERMAL"):
+        _, p_max = _output_limits(unit)
         ramp_up = _unit_number(unit, "rampUp")
         ramp_down = _unit_number(unit, "rampDown")
         startup_ramp = _ramp_capacity(unit, "startUpCapacity", p_max)
         shutdown_ramp = _ramp_capacity(unit, "shutDownCapacity", p_max)
 
-        previous_status = _initial_status(unit, initial_on)
-        previous_power: Any = _initial_power(unit, initial_power_mw, previous_status)
-        if previous_status == 0 and previous_power != 0.0:
-            raise ValueError(
-                f"Initial power must be 0 when unit {unit_id} is offline"
+        status_prev = _initial_status(unit)
+        pg_prev = _initial_power(unit, status_prev)
+        if status_prev == 0 and pg_prev != 0.0:
+            raise ValueError(f"Initial power must be 0 when unit {unit.id} is offline")
+
+        for t_idx, t in enumerate(periods):
+            key = (unit.id, t)
+            status = _fixed_status(unit, t, t_idx)
+            startup_status = max(status - status_prev, 0)
+            shutdown_status = max(status_prev - status, 0)
+            pg = opt_model.get_var(THERMAL_POWER, key)
+
+            _add_constraint(
+                opt_model,
+                f"thermal_ramp_up_{unit.id}_{t}",
+                pg
+                - pg_prev
+                - ramp_up * step_hours * status_prev
+                - startup_ramp * startup_status,
+                poi.Leq,
+                0.0,
+                f"thermal_ramp_up[{unit.id},{t}]",
+            )
+            _add_constraint(
+                opt_model,
+                f"thermal_ramp_down_{unit.id}_{t}",
+                pg_prev
+                - pg
+                - ramp_down * step_hours * status
+                - shutdown_ramp * shutdown_status,
+                poi.Leq,
+                0.0,
+                f"thermal_ramp_down[{unit.id},{t}]",
             )
 
-        for period in periods:
-            key = (unit_id, period)
-            # 2.2 根据固定开机状态推导启动、停机状态
-            status = _binary(fixed_on, key, "fixed commitment")
-            startup_status = max(status - previous_status, 0)
-            shutdown_status = max(previous_status - status, 0)
-            power = _var(variables.power, key, "thermal power")
-
-            # 2.3 固定开机状态：u_g,t = fixed_on_g,t
-            constraints[f"thermal_fixed_on_{unit_id}_{period}"] = (
-                model.add_linear_constraint(
-                    _var(variables.is_on, key, "thermal commitment"),
-                    poi.Eq,
-                    status,
-                    name=f"thermal_fixed_on[{unit_id},{period}]",
-                )
-            )
-            # 2.4 固定启动状态：v_g,t = max(u_g,t - u_g,t-1, 0)
-            constraints[f"thermal_fixed_startup_{unit_id}_{period}"] = (
-                model.add_linear_constraint(
-                    _var(variables.startup, key, "thermal startup"),
-                    poi.Eq,
-                    startup_status,
-                    name=f"thermal_fixed_startup[{unit_id},{period}]",
-                )
-            )
-            # 2.5 固定停机状态：w_g,t = max(u_g,t-1 - u_g,t, 0)
-            constraints[f"thermal_fixed_shutdown_{unit_id}_{period}"] = (
-                model.add_linear_constraint(
-                    _var(variables.shutdown, key, "thermal shutdown"),
-                    poi.Eq,
-                    shutdown_status,
-                    name=f"thermal_fixed_shutdown[{unit_id},{period}]",
-                )
-            )
-            # 2.6 固定状态下的出力上下限：Pmin * status <= P_g,t <= Pmax * status
-            constraints[f"thermal_pmin_{unit_id}_{period}"] = (
-                model.add_linear_constraint(
-                    power - p_min * status,
-                    poi.Geq,
-                    0.0,
-                    name=f"thermal_pmin[{unit_id},{period}]",
-                )
-            )
-            constraints[f"thermal_pmax_{unit_id}_{period}"] = (
-                model.add_linear_constraint(
-                    power - p_max * status,
-                    poi.Leq,
-                    0.0,
-                    name=f"thermal_pmax[{unit_id},{period}]",
-                )
-            )
-            # 2.7 固定状态下的上爬坡约束
-            constraints[f"thermal_ramp_up_{unit_id}_{period}"] = (
-                model.add_linear_constraint(
-                    power
-                    - previous_power
-                    - ramp_up * step_hours * previous_status
-                    - startup_ramp * startup_status,
-                    poi.Leq,
-                    0.0,
-                    name=f"thermal_ramp_up[{unit_id},{period}]",
-                )
-            )
-            # 2.8 固定状态下的下爬坡约束
-            constraints[f"thermal_ramp_down_{unit_id}_{period}"] = (
-                model.add_linear_constraint(
-                    previous_power
-                    - power
-                    - ramp_down * step_hours * status
-                    - shutdown_ramp * shutdown_status,
-                    poi.Leq,
-                    0.0,
-                    name=f"thermal_ramp_down[{unit_id},{period}]",
-                )
-            )
-
-            previous_status = status
-            previous_power = power
-
-    return constraints
+            status_prev = status
+            pg_prev = pg
 
 
-def _add_minimum_time_constraints(
-    model: Any,
-    variables: ThermalVariables,
-    constraints: dict[str, Any],
-    unit: Any,
-    periods: tuple[Hashable, ...],
-    initial_on: Mapping[str, int] | None,
-    initial_on_hours: Mapping[str, float] | None,
-    initial_off_hours: Mapping[str, float] | None,
-    step_hours: float,
-) -> None:
-    unit_id = unit.id
-    # 3. 将最小开停机小时数换算成优化时段数
+def _add_minimum_time_constraints_for_unit(opt_model, unit, periods, step_hours):
     min_up = _unit_number(unit, "minON")
     min_down = _unit_number(unit, "minOFF")
     up_periods = math.ceil(min_up / step_hours)
     down_periods = math.ceil(min_down / step_hours)
 
     if up_periods > 1:
-        for period_index in range(up_periods - 1, len(periods)):
-            period = periods[period_index]
-            # 3.1 最小开机时间：最近 up_periods 内启动过，则当前必须开机
+        for t_idx in range(up_periods - 1, len(periods)):
+            t = periods[t_idx]
             startup_sum = poi.quicksum(
-                _var(
-                    variables.startup,
-                    (unit_id, periods[index]),
-                    "thermal startup",
-                )
-                for index in range(period_index - up_periods + 1, period_index + 1)
+                opt_model.get_var(THERMAL_STARTUP, (unit.id, periods[i]))
+                for i in range(t_idx - up_periods + 1, t_idx + 1)
             )
-            constraints[f"thermal_min_up_{unit_id}_{period}"] = (
-                model.add_linear_constraint(
-                    startup_sum
-                    - _var(variables.is_on, (unit_id, period), "thermal commitment"),
-                    poi.Leq,
-                    0.0,
-                    name=f"thermal_min_up[{unit_id},{period}]",
-                )
+            _add_constraint(
+                opt_model,
+                f"thermal_min_up_{unit.id}_{t}",
+                startup_sum - opt_model.get_var(THERMAL_IS_ON, (unit.id, t)),
+                poi.Leq,
+                0.0,
+                f"thermal_min_up[{unit.id},{t}]",
             )
 
     if down_periods > 1:
-        for period_index in range(down_periods - 1, len(periods)):
-            period = periods[period_index]
-            # 3.2 最小停机时间：最近 down_periods 内停机过，则当前必须停机
+        for t_idx in range(down_periods - 1, len(periods)):
+            t = periods[t_idx]
             shutdown_sum = poi.quicksum(
-                _var(
-                    variables.shutdown,
-                    (unit_id, periods[index]),
-                    "thermal shutdown",
-                )
-                for index in range(period_index - down_periods + 1, period_index + 1)
+                opt_model.get_var(THERMAL_SHUTDOWN, (unit.id, periods[i]))
+                for i in range(t_idx - down_periods + 1, t_idx + 1)
             )
-            constraints[f"thermal_min_down_{unit_id}_{period}"] = (
-                model.add_linear_constraint(
-                    shutdown_sum
-                    + _var(variables.is_on, (unit_id, period), "thermal commitment"),
-                    poi.Leq,
-                    1.0,
-                    name=f"thermal_min_down[{unit_id},{period}]",
-                )
+            _add_constraint(
+                opt_model,
+                f"thermal_min_down_{unit.id}_{t}",
+                shutdown_sum + opt_model.get_var(THERMAL_IS_ON, (unit.id, t)),
+                poi.Leq,
+                1.0,
+                f"thermal_min_down[{unit.id},{t}]",
             )
 
-    initial_state = _initial_status(unit, initial_on)
-    elapsed_on = _initial_hours(unit, initial_on_hours, online=True)
-    elapsed_off = _initial_hours(unit, initial_off_hours, online=False)
+    initial_state = _initial_status(unit)
+    elapsed_on = _initial_hours(unit, online=True)
+    elapsed_off = _initial_hours(unit, online=False)
 
-    # 3.3 处理滚动优化窗口开始前已经持续的开机/停机时间
     if initial_state == 1:
         forced_value = 1.0
         forced_periods = math.ceil(max(0.0, min_up - elapsed_on) / step_hours)
@@ -331,41 +341,46 @@ def _add_minimum_time_constraints(
         forced_value = 0.0
         forced_periods = math.ceil(max(0.0, min_down - elapsed_off) / step_hours)
 
-    for period in periods[:forced_periods]:
-        constraints[f"thermal_initial_residual_{unit_id}_{period}"] = (
-            model.add_linear_constraint(
-                _var(variables.is_on, (unit_id, period), "thermal commitment"),
-                poi.Eq,
-                forced_value,
-                name=f"thermal_initial_residual[{unit_id},{period}]",
-            )
+    for t in periods[:forced_periods]:
+        _add_constraint(
+            opt_model,
+            f"thermal_initial_residual_{unit.id}_{t}",
+            opt_model.get_var(THERMAL_IS_ON, (unit.id, t)),
+            poi.Eq,
+            forced_value,
+            f"thermal_initial_residual[{unit.id},{t}]",
         )
 
 
-def _var(variables: Mapping[Any, Any], key: Any, label: str) -> Any:
-    try:
-        return variables[key]
-    except KeyError as exc:
-        raise KeyError(f"Missing {label} variable: {key}") from exc
+def _add_constraint(opt_model, constraint_key, expr, sense, rhs, name):
+    opt_model.add_linear_constraint(constraint_key, expr, sense, rhs, name)
 
 
-def _binary(mapping: Mapping[Any, int], key: Any, label: str) -> int:
-    if key not in mapping:
-        raise ValueError(f"Missing {label}: {key}")
-
-    value = int(mapping[key])
-    if value not in (0, 1):
-        raise ValueError(f"{label} must be 0 or 1: {key}")
-    return value
+def _output_limits(unit):
+    p_min = _unit_number(unit, "Pmin")
+    p_max = _unit_number(unit, "Pmax")
+    if p_max < p_min:
+        raise ValueError(f"Invalid output limits for unit {unit.id}")
+    return p_min, p_max
 
 
-def _require_positive_step(step_hours: float) -> None:
+def _period_step_hours(periods):
+    periods = tuple(periods)
+    if len(periods) >= 2:
+        delta = periods[1] - periods[0]
+        if isinstance(delta, pd.Timedelta):
+            hours = delta / pd.Timedelta(hours=1)
+            _require_positive_step(hours)
+            return float(hours)
+    return 1.0
+
+
+def _require_positive_step(step_hours):
     if not math.isfinite(step_hours) or step_hours <= 0.0:
         raise ValueError("step_hours must be positive")
 
 
-def _unit_number(unit: Any, field: str, default: float | None = None) -> float:
-    # 4. 统一读取并校验火电数值字段，避免主约束逻辑重复写参数检查
+def _unit_number(unit, field, default=None):
     value = getattr(unit, field, default)
     if value is None:
         raise ValueError(f"Thermal unit {unit.id} is missing field {field}")
@@ -376,51 +391,76 @@ def _unit_number(unit: Any, field: str, default: float | None = None) -> float:
     return value
 
 
-def _ramp_capacity(unit: Any, field: str, fallback: float) -> float:
-    # 5. 启动/停机爬坡容量缺省或为 0 时，按 Pmax 放宽处理
+def _ramp_capacity(unit, field, fallback):
     value = _unit_number(unit, field, fallback)
     if value == 0.0:
         return fallback
     return value
 
 
-def _initial_status(unit: Any, override: Mapping[str, int] | None) -> int:
-    if override is not None and unit.id in override:
-        return _binary(override, unit.id, "initial commitment")
-
+def _initial_status(unit):
     init_t = float(getattr(unit, "initT", 0.0))
     return 1 if init_t > 0.0 else 0
 
 
-def _initial_hours(
-    unit: Any,
-    override: Mapping[str, float] | None,
-    online: bool,
-) -> float:
-    if override is not None and unit.id in override:
-        value = float(override[unit.id])
-    else:
-        init_t = float(getattr(unit, "initT", 0.0))
-        value = max(init_t, 0.0) if online else max(-init_t, 0.0)
+def _initial_hours(unit, online):
+    init_t = float(getattr(unit, "initT", 0.0))
+    value = max(init_t, 0.0) if online else max(-init_t, 0.0)
 
     if not math.isfinite(value) or value < 0.0:
         raise ValueError(f"Initial hours must be finite and nonnegative: {unit.id}")
     return value
 
 
-def _initial_power(
-    unit: Any,
-    override: Mapping[str, float] | None,
-    initial_status: int,
-) -> float:
-    if override is not None and unit.id in override:
-        value = float(override[unit.id])
-    else:
-        value = getattr(unit, "initialPower", None)
-        if value is None:
-            value = _unit_number(unit, "Pmin") if initial_status == 1 else 0.0
-        value = float(value)
+def _initial_power(unit, initial_status):
+    value = getattr(unit, "initialPower", None)
+    if value is None:
+        value = _unit_number(unit, "Pmin") if initial_status == 1 else 0.0
 
+    value = float(value)
     if not math.isfinite(value) or value < 0.0:
         raise ValueError(f"Initial power must be finite and nonnegative: {unit.id}")
+    return value
+
+
+def _fixed_status(unit, period, period_index):
+    onoff = getattr(unit, "ONOFF", None)
+    if onoff is None or onoff == {}:
+        raise ValueError(f"Missing fixed commitment: {(unit.id, period)}")
+
+    try:
+        if isinstance(onoff, Mapping):
+            if period in onoff:
+                return _as_binary(onoff[period], unit, period)
+            if period_index in onoff:
+                return _as_binary(onoff[period_index], unit, period)
+            if "S0" in onoff:
+                return _fixed_status_from_container(
+                    onoff["S0"], unit, period, period_index
+                )
+        return _fixed_status_from_container(onoff, unit, period, period_index)
+    except (IndexError, KeyError, TypeError) as exc:
+        raise ValueError(f"Missing fixed commitment: {(unit.id, period)}") from exc
+
+    raise ValueError(f"Missing fixed commitment: {(unit.id, period)}")
+
+
+def _fixed_status_from_container(values, unit, period, period_index):
+    if isinstance(values, Mapping):
+        if period in values:
+            return _as_binary(values[period], unit, period)
+        if period_index in values:
+            return _as_binary(values[period_index], unit, period)
+        raise KeyError(period)
+
+    if isinstance(values, Sequence) and not isinstance(values, (str, bytes)):
+        return _as_binary(values[period_index], unit, period)
+
+    raise TypeError("Unsupported ONOFF format")
+
+
+def _as_binary(value, unit, period):
+    value = int(value)
+    if value not in (0, 1):
+        raise ValueError(f"fixed commitment must be 0 or 1: {(unit.id, period)}")
     return value

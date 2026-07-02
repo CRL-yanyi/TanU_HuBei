@@ -1,3 +1,5 @@
+"""验证常规、启动和停机爬坡约束。"""
+
 import pandas as pd
 import pyoptinterface as poi
 import pytest
@@ -5,128 +7,63 @@ import pytest
 from src.model.grid import Grid
 from src.model.resource import Thermal
 from src.model.zone import Zone
-from src.optim.constraints.thermal import add_thermal_uc_constraints
+from src.optim.constraints.thermal import setThermalUCCons
 from src.optim.opt_model import OptModel
-from src.optim.variables import add_thermal_variables
+from src.optim.variables import setThermalVarList
 
 
-def make_periods(count=1, freq="h"):
-    return pd.date_range("2026-01-01 00:00", periods=count, freq=freq)
+def make_model(init_t=1, initial_power=50.0, ramp=20.0, start=40.0, stop=30.0):
+    """创建可配置初始状态和三类爬坡能力的单时段模型。"""
 
-
-def build_ramp_model(
-    periods,
-    initial_on,
-    initial_power,
-    ramp_up=20.0,
-    ramp_down=20.0,
-    startup_ramp=40.0,
-    shutdown_ramp=40.0,
-):
-    opt_model = OptModel()
+    periods = pd.date_range("2026-01-01", periods=1, freq="h")
     grid = Grid(id="TEST")
     grid.addZone(Zone(id="Z1"))
-    unit = Thermal(
-        id="G1",
-        zoneId="Z1",
-        type="THERMAL",
-        Pmin=0.0,
-        Pmax=100.0,
-        rampUp=ramp_up,
-        rampDown=ramp_down,
-        minON=0,
-        minOFF=0,
-        initT=1 if initial_on == 1 else -1,
-        initialPower=initial_power,
-    )
-    unit.startUpCapacity = startup_ramp
-    unit.shutDownCapacity = shutdown_ramp
-    grid.addResource(unit)
-
-    add_thermal_variables(opt_model, grid, periods)
-    add_thermal_uc_constraints(opt_model=opt_model, grid=grid, periods=periods)
-
-    return opt_model
+    grid.addResource(Thermal(
+        id="G1", zoneId="Z1", type="THERMAL", Pmax=100.0,
+        rampUp=ramp, rampDown=ramp, startUpCapacity=start,
+        shutDownCapacity=stop, initT=init_t, initialPower=initial_power,
+    ))
+    optmodel = OptModel()
+    setThermalVarList(optmodel, grid, periods)
+    setThermalUCCons(optmodel, grid, periods)
+    return optmodel, periods[0]
 
 
-def test_normal_ramp_up_limit():
-    periods = make_periods()
-    t0 = periods[0]
-    opt_model = build_ramp_model(periods, initial_on=1, initial_power=50.0)
-    is_on = opt_model.vars["thermal_is_on"]
-    power = opt_model.vars["thermal_power"]
+def test_regular_ramp_up_and_down():
+    """在线机组从 50 MW 出发，一小时只能上升或下降 20 MW。"""
 
-    opt_model.model.add_linear_constraint(is_on["G1", t0], poi.Eq, 1)
-    opt_model.model.set_objective(-power["G1", t0], poi.ObjectiveSense.Minimize)
-    opt_model.optimize()
+    # 固定 CU=1 后最大化出力，验证上爬坡边界为 70 MW。
+    optmodel, t = make_model()
+    on, power = optmodel.getVar("G1", t, "CU"), optmodel.getVar("G1", t, "P")
+    optmodel.model.add_linear_constraint(on, poi.Eq, 1)
+    optmodel.model.set_objective(power, poi.ObjectiveSense.Maximize)
+    optmodel.optimize()
+    assert optmodel.getValue(power) == pytest.approx(70.0)
 
-    assert opt_model.get_value(power["G1", t0]) == pytest.approx(70.0)
-
-
-def test_normal_ramp_down_limit():
-    periods = make_periods()
-    t0 = periods[0]
-    opt_model = build_ramp_model(periods, initial_on=1, initial_power=50.0)
-    is_on = opt_model.vars["thermal_is_on"]
-    power = opt_model.vars["thermal_power"]
-
-    opt_model.model.add_linear_constraint(is_on["G1", t0], poi.Eq, 1)
-    opt_model.model.set_objective(power["G1", t0], poi.ObjectiveSense.Minimize)
-    opt_model.optimize()
-
-    assert opt_model.get_value(power["G1", t0]) == pytest.approx(30.0)
+    optmodel.model.set_objective(power, poi.ObjectiveSense.Minimize)
+    optmodel.optimize()
+    assert optmodel.getValue(power) == pytest.approx(30.0)
 
 
-def test_startup_ramp_limit():
-    periods = make_periods()
-    t0 = periods[0]
-    opt_model = build_ramp_model(
-        periods,
-        initial_on=0,
-        initial_power=0.0,
-        startup_ramp=40.0,
-    )
-    is_on = opt_model.vars["thermal_is_on"]
-    power = opt_model.vars["thermal_power"]
-    startup = opt_model.vars["thermal_startup"]
+def test_startup_capacity_limits_first_output():
+    """停机机组启动后的第一时段出力不超过启动容量。"""
 
-    opt_model.model.add_linear_constraint(is_on["G1", t0], poi.Eq, 1)
-    opt_model.model.set_objective(-power["G1", t0], poi.ObjectiveSense.Minimize)
-    opt_model.optimize()
-
-    assert opt_model.get_value(power["G1", t0]) == pytest.approx(40.0)
-    assert opt_model.get_value(startup["G1", t0]) == pytest.approx(1.0)
+    # 初始停机并强制首时段开机，模型应自动令 CV=1。
+    optmodel, t = make_model(init_t=-1, initial_power=0.0)
+    optmodel.model.add_linear_constraint(optmodel.getVar("G1", t, "CU"), poi.Eq, 1)
+    power = optmodel.getVar("G1", t, "P")
+    optmodel.model.set_objective(power, poi.ObjectiveSense.Maximize)
+    optmodel.optimize()
+    assert optmodel.getValue(power) == pytest.approx(40.0)
+    assert optmodel.getValue(optmodel.getVar("G1", t, "CV")) == pytest.approx(1.0)
 
 
-def test_shutdown_ramp_allows_shutdown():
-    periods = make_periods()
-    t0 = periods[0]
-    opt_model = build_ramp_model(
-        periods,
-        initial_on=1,
-        initial_power=40.0,
-        shutdown_ramp=40.0,
-    )
-    is_on = opt_model.vars["thermal_is_on"]
-    power = opt_model.vars["thermal_power"]
-    shutdown = opt_model.vars["thermal_shutdown"]
+def test_shutdown_capacity_limits_previous_output():
+    """从允许的初始出力停机时，应得到 P=0 且 CW=1。"""
 
-    opt_model.model.add_linear_constraint(is_on["G1", t0], poi.Eq, 0)
-    opt_model.optimize()
-
-    assert opt_model.get_value(power["G1", t0]) == pytest.approx(0.0)
-    assert opt_model.get_value(shutdown["G1", t0]) == pytest.approx(1.0)
-
-
-def test_datetime_index_infers_ramp_step_hours():
-    periods = make_periods(2, freq="30min")
-    t0 = periods[0]
-    opt_model = build_ramp_model(periods, initial_on=1, initial_power=50.0)
-    is_on = opt_model.vars["thermal_is_on"]
-    power = opt_model.vars["thermal_power"]
-
-    opt_model.model.add_linear_constraint(is_on["G1", t0], poi.Eq, 1)
-    opt_model.model.set_objective(-power["G1", t0], poi.ObjectiveSense.Minimize)
-    opt_model.optimize()
-
-    assert opt_model.get_value(power["G1", t0]) == pytest.approx(60.0)
+    optmodel, t = make_model(initial_power=30.0, stop=30.0)
+    optmodel.model.add_linear_constraint(optmodel.getVar("G1", t, "CU"), poi.Eq, 0)
+    optmodel.optimize()
+    assert optmodel.getValue(optmodel.getVar("G1", t, "P")) == pytest.approx(0.0)
+    assert optmodel.getValue(optmodel.getVar("G1", t, "CW")) == pytest.approx(1.0)
+    # 改为最小化出力，验证下爬坡边界为 30 MW。

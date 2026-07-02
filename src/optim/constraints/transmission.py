@@ -1,65 +1,55 @@
 # -*- coding: utf-8 -*-
-from typing import Any, Hashable, Iterable
+"""区域间可控输电约束。"""
 
+import pandas as pd
 import pyoptinterface as poi
 
 from src.model.grid import Grid
-from src.optim.variables import TransmissionVariables
+from src.model.intertran import Intertran
+from src.optim.opt_model import OptModel
 
 
-def add_transmission_constraints(
-    model: Any,
-    grid: Grid,
-    variables: TransmissionVariables,
-    periods: Iterable[Hashable],
-) -> dict[str, Any]:
-    """添加区域间输电断面潮流上下限约束。"""
+def setIntertranCons(
+    optmodel: OptModel,
+    gridData: Grid,
+    timeIdx: pd.DatetimeIndex,
+) -> None:
+    """薄入口：为 Grid 中全部可控断面添加容量约束。"""
 
-    constraints: dict[str, Any] = {}
-    periods = tuple(periods)
+    # 每条 Intertran 独立建立正向和反向输电容量限制。
+    for intertran in gridData.intertrans.values():
+        setIntertranPCons(optmodel, intertran, timeIdx)
 
-    # 1. 按 Grid 中的跨区断面逐时段建立潮流上下限
-    for line in grid.intertrans.values():
-        # 正方向为 fromZone -> toZone，反方向容量写成负下限
-        capacity_from = float(line.capacityFromZone)
-        capacity_to = float(line.capacityToZone)
-        if capacity_from < 0.0 or capacity_to < 0.0:
-            raise ValueError(f"Invalid transmission limits for {line.id}")
 
-        flow_min = -capacity_from#反方向最大容量
-        flow_max = capacity_to#正方向最大容量。
+def setIntertranPCons(
+    optmodel: OptModel,
+    res: Intertran,
+    timeIdx: pd.DatetimeIndex,
+    constype: str = "P",
+) -> None:
+    """断面潮流范围：``-capacityFromZone <= P <= capacityToZone``。"""
 
-        # 1.1 断面停运时强制潮流为 0
-        if getattr(line, "status", 1) == 0:
-            flow_min = 0.0
-            flow_max = 0.0
+    # capacityFromZone 表示反向容量，capacityToZone 表示正向容量。
+    capacity_from = float(res.capacityFromZone)
+    capacity_to = float(res.capacityToZone)
+    # 容量参数本身必须非负，方向通过潮流变量正负号表达。
+    if capacity_from < 0.0 or capacity_to < 0.0:
+        raise ValueError(f"Invalid transmission limits for {res.id}")
 
-        if flow_max < flow_min:
-            raise ValueError(f"Invalid transmission limits for {line.id}")
+    # 停运线路上下限均设为 0；投运线路允许双向潮流。
+    lower = -capacity_from if res.status else 0.0
+    upper = capacity_to if res.status else 0.0
+    # 对每个调度时段建立一对上下限约束。
+    for t in timeIdx:
+        # P 变量正值表示 fromZone 流向 toZone。
+        flow = optmodel.getVar(res.id, t, "P")
 
-        for period in periods:
-            key = (line.id, period)
-            if key not in variables.flow:
-                raise KeyError(f"Missing transmission flow variable: {key}")
+        # 下限移项为 flow-lower >= 0，对应公式 2.7.1。
+        expr = poi.ExprBuilder()
+        expr += flow - lower
+        optmodel.addCons((res.id, t, constype, "2.7.1"), expr, poi.Geq)
 
-            flow = variables.flow[key]
-            # 1.2 断面下限：F_l,t >= -capacityFromZone
-            constraints[f"transmission_min_{line.id}_{period}"] = (
-                model.add_linear_constraint(
-                    flow,
-                    poi.Geq,
-                    flow_min,
-                    name=f"transmission_min[{line.id},{period}]",
-                )
-            )
-            # 1.3 断面上限：F_l,t <= capacityToZone
-            constraints[f"transmission_max_{line.id}_{period}"] = (
-                model.add_linear_constraint(
-                    flow,
-                    poi.Leq,
-                    flow_max,
-                    name=f"transmission_max[{line.id},{period}]",
-                )
-            )
-
-    return constraints
+        # 上限移项为 flow-upper <= 0，对应公式 2.7.2。
+        expr = poi.ExprBuilder()
+        expr += flow - upper
+        optmodel.addCons((res.id, t, constype, "2.7.2"), expr, poi.Leq)

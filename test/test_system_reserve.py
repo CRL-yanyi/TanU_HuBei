@@ -1,104 +1,63 @@
+"""验证在线火电剩余容量覆盖系统旋转备用需求。"""
+
 import pandas as pd
 import pyoptinterface as poi
 import pytest
 
 from src.model.grid import Grid
-from src.model.resource import Thermal
+from src.model.resource import Reserve, Thermal
 from src.model.zone import Zone
-from src.optim.constraints.reserve import add_system_reserve_constraints
-from src.optim.constraints.thermal import add_thermal_uc_constraints
+from src.optim.constraints.reserve import setSystemReserveCons
+from src.optim.constraints.thermal import setThermalUCCons
 from src.optim.opt_model import OptModel
-from src.optim.variables import add_thermal_variables
+from src.optim.variables import setThermalVarList
 
 
-def make_periods(count=1):
-    return pd.date_range("2026-01-01 00:00", periods=count, freq="h")
+def make_case(requirement):
+    """创建一台 100 MW 火电和给定 MW 备用需求。"""
+
+    # 火电初始在线且爬坡充分，不让其他约束干扰备用边界测试。
+    periods = pd.date_range("2026-01-01", periods=1, freq="h")
+    grid = Grid(id="TEST"); grid.addZone(Zone(id="Z1"))
+    grid.addResource(Thermal(id="G1", zoneId="Z1", type="THERMAL",
+                             Pmax=100, rampUp=100, rampDown=100, initT=1,
+                             initialPower=50, startUpCapacity=100,
+                             shutDownCapacity=100))
+    grid.addResource(Reserve(id="R1", zoneId="Z1", type="RESERVE",
+                             TSCapacity={periods[0]: requirement}))
+    optmodel = OptModel(); setThermalVarList(optmodel, grid, periods)
+    return optmodel, grid, periods
 
 
-def make_grid():
-    grid = Grid(id="TEST")
-    grid.addZone(Zone(id="Z1"))
-    unit = Thermal(
-        id="G1",
-        zoneId="Z1",
-        type="THERMAL",
-        Pmin=0.0,
-        Pmax=100.0,
-        rampUp=100.0,
-        rampDown=100.0,
-        initT=1,
-        initialPower=50.0,
-    )
-    unit.startUpCapacity = 100.0
-    unit.shutDownCapacity = 100.0
-    grid.addResource(unit)
-    return grid
+def test_system_reserve_limits_dispatch():
+    """20 MW 备用需求应把在线机组最大出力限制在 80 MW。"""
+
+    # 添加 UC 和备用约束，并固定机组处于开机状态。
+    optmodel, grid, periods = make_case(20)
+    setThermalUCCons(optmodel, grid, periods)
+    setSystemReserveCons(optmodel, grid, periods)
+    power = optmodel.getVar("G1", periods[0], "P")
+    optmodel.model.add_linear_constraint(optmodel.getVar("G1", periods[0], "CU"), poi.Eq, 1)
+    # 最大化出力，使备用约束恰好达到边界。
+    optmodel.model.set_objective(power, poi.ObjectiveSense.Maximize)
+    optmodel.optimize()
+    assert optmodel.getValue(power) == pytest.approx(80)
+    # 约束表达式还应使用 Grid ID 和公式编号登记。
+    assert ("TEST", periods[0], "R", "2.9.2") in optmodel.cons_expr
 
 
-def test_system_reserve_limits_thermal_dispatch():
-    opt_model = OptModel()
-    periods = make_periods()
-    grid = make_grid()
-    add_thermal_variables(opt_model, grid, periods)
+def test_missing_reserve_requirement_is_rejected():
+    """备用资源必须包含每个调度时段的需求值。"""
 
-    add_thermal_uc_constraints(opt_model=opt_model, grid=grid, periods=periods)
-    add_system_reserve_constraints(
-        opt_model=opt_model,
-        grid=grid,
-        periods=periods,
-        reserve_requirement_mw={periods[0]: 20.0},
-    )
-
-    is_on = opt_model.vars["thermal_is_on"]
-    power = opt_model.vars["thermal_power"]
-    opt_model.model.add_linear_constraint(is_on["G1", periods[0]], poi.Eq, 1)
-    opt_model.model.set_objective(power["G1", periods[0]], poi.ObjectiveSense.Maximize)
-    opt_model.optimize()
-
-    assert opt_model.get_value(power["G1", periods[0]]) == pytest.approx(80.0)
-
-
-def test_system_reserve_returns_dict():
-    opt_model = OptModel()
-    periods = make_periods()
-    grid = make_grid()
-    add_thermal_variables(opt_model, grid, periods)
-
-    constraints = add_system_reserve_constraints(
-        opt_model=opt_model,
-        grid=grid,
-        periods=periods,
-        reserve_requirement_mw={periods[0]: 0.0},
-    )
-
-    assert set(constraints) == {f"system_reserve_{periods[0]}"}
-
-
-def test_reject_missing_reserve_requirement():
-    opt_model = OptModel()
-    periods = make_periods()
-    grid = make_grid()
-    add_thermal_variables(opt_model, grid, periods)
-
+    optmodel, grid, periods = make_case(0)
+    grid.getResFromId("R1").TSCapacity = {}
     with pytest.raises(ValueError, match="Missing reserve requirement"):
-        add_system_reserve_constraints(
-            opt_model=opt_model,
-            grid=grid,
-            periods=periods,
-            reserve_requirement_mw={},
-        )
+        setSystemReserveCons(optmodel, grid, periods)
 
 
-def test_reject_invalid_reserve_requirement():
-    opt_model = OptModel()
-    periods = make_periods()
-    grid = make_grid()
-    add_thermal_variables(opt_model, grid, periods)
+def test_invalid_reserve_requirement_is_rejected():
+    """负备用需求不具有物理意义，应在建模阶段报错。"""
 
+    optmodel, grid, periods = make_case(-1)
     with pytest.raises(ValueError, match="finite and nonnegative"):
-        add_system_reserve_constraints(
-            opt_model=opt_model,
-            grid=grid,
-            periods=periods,
-            reserve_requirement_mw={periods[0]: -1.0},
-        )
+        setSystemReserveCons(optmodel, grid, periods)

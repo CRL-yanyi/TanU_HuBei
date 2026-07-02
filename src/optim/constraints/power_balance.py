@@ -1,102 +1,80 @@
 # -*- coding: utf-8 -*-
-import math
-from typing import Any, Hashable, Iterable, Mapping, Sequence
+"""分区功率平衡约束。"""
 
+import math
+
+import pandas as pd
 import pyoptinterface as poi
 
 from src.model.grid import Grid
+from src.model.zone import Zone
+from src.optim.opt_model import OptModel
 
 
-VariableKey = tuple[str, Hashable]#资源变量或输电变量
-BalanceKey = tuple[str, Hashable]#分区需求
+def setPowerBalanceCons(
+    optmodel: OptModel,
+    gridData: Grid,
+    timeIdx: pd.DatetimeIndex,
+) -> None:
+    """为每个分区添加逐时功率平衡。"""
+
+    # 每个 Zone 独立建立平衡等式，联络线变量负责分区之间的耦合。
+    for zone in gridData.zones.values():
+        setZonePowerBalanceCons(optmodel, zone, gridData, timeIdx)
 
 
-def add_power_balance_constraints(
-    model: Any,
-    grid: Grid,
-    periods: Iterable[Hashable],
-    demand_mw: Mapping[BalanceKey, float],#每个分区每个时段的负荷。
-    supply_groups: Sequence[Mapping[str, Any]] = (),#供给侧资源组，例如火电、水电、新能源出力。
-    demand_groups: Sequence[Mapping[str, Any]] = (),#需求侧资源组，例如储能充电。
-    transmission_flow: Mapping[VariableKey, Any] | None = None,#断面潮流变量
-    fixed_external_injection_mw: Mapping[BalanceKey, float] | None = None,#外部固定注入
-) -> dict[str, Any]:
-    """添加分区功率平衡约束，按 Grid 分区和跨区断面组织表达式。"""
+def setZonePowerBalanceCons(
+    optmodel: OptModel,
+    zone: Zone,
+    gridData: Grid,
+    timeIdx: pd.DatetimeIndex,
+    constype: str = "P",
+) -> None:
+    """汇总分区内资源与联络线，使净注入等于零。"""
 
-    periods = tuple(periods)
-    transmission_flow = transmission_flow or {}
-    fixed_external_injection_mw = fixed_external_injection_mw or {}
-    constraints: dict[str, Any] = {}
+    # 每个调度时段建立一条“供给-需求+净流入=0”的等式。
+    for t in timeIdx:
+        # 空表达式从 0 开始，随后按资源类型逐项累加。
+        expr = poi.ExprBuilder()
 
-    # 1. 对每个分区、每个时段建立一条功率平衡等式
-    for zone_id in grid.zones:
-        for period in periods:
-            key = (zone_id, period)
-            if key not in demand_mw:
-                raise ValueError(f"Missing zonal demand: {key}")
+        # 火电、水电、风电、光伏都作为正向电源出力加入平衡式。
+        for resource_type in ("THERMAL", "HYDRO", "WIND", "PV"):
+            for res in gridData.getResListFromZoneAndType(zone.id, resource_type):
+                expr += optmodel.getVar(res.id, t, "P")
 
-            demand = float(demand_mw[key])#必须有限且非负。
-            injection = float(fixed_external_injection_mw.get(key, 0.0))#必须有限，但允许正负。
-            if not math.isfinite(demand) or demand < 0.0:
-                raise ValueError(f"Demand must be finite and nonnegative: {key}")
-            if not math.isfinite(injection):
-                raise ValueError(f"External injection must be finite: {key}")
+        # 储能放电 PD 是供给，充电 PC 是额外用电需求。
+        for storage in gridData.getResListFromZoneAndType(zone.id, "STORAGE"):
+            expr += optmodel.getVar(storage.id, t, "P", "PD")
+            expr -= optmodel.getVar(storage.id, t, "P", "PC")
 
-            # 1.1 平衡式初值：固定外部注入 - 本地负荷
-            expr = poi.ExprBuilder()
-            expr += injection - demand
+        # 负荷是固定需求，因此从表达式中扣除其逐时 MW 值。
+        for load in gridData.getResListFromZoneAndType(zone.id, "LOAD"):
+            expr -= _series_value(load, t)
 
-            # 1.2 供给侧资源：火电、水电、新能源、储能放电等
-            for group in supply_groups:
-                expr += _sum_group_for_zone(group, zone_id, period)
+        # 正潮流定义为 fromZone -> toZone：终点加流入，起点减流出。
+        for line in gridData.intertrans.values():
+            flow = optmodel.getVar(line.id, t, "P")
+            if line.toZone == zone.id:
+                expr += flow
+            if line.fromZone == zone.id:
+                expr -= flow
 
-            # 1.3 需求侧资源：储能充电、抽水等
-            for group in demand_groups:
-                expr -= _sum_group_for_zone(group, zone_id, period)
-
-            # 1.4 跨区潮流：fromZone 流出为负，toZone 流入为正
-            for line in grid.intertrans.values():
-                flow_key = (line.id, period)
-                if flow_key not in transmission_flow:
-                    raise KeyError(f"Missing transmission flow variable: {flow_key}")
-
-                flow = transmission_flow[flow_key]
-                if zone_id == line.fromZone:
-                    expr -= flow
-                if zone_id == line.toZone:
-                    expr += flow
-
-            constraints[f"power_balance_{zone_id}_{period}"] = (
-                model.add_linear_constraint(
-                    expr,
-                    poi.Eq,
-                    0.0,
-                    name=f"power_balance[{zone_id},{period}]",
-                )
-            )
-
-    return constraints
+        # 净注入等于零即得到该分区、该时段的功率平衡等式。
+        optmodel.addCons((zone.id, t, constype, "2.9.1"), expr, poi.Eq)
 
 
-def _sum_group_for_zone(
-    group: Mapping[str, Any],
-    zone_id: str,
-    period: Hashable,
-) -> Any:
-    # 2. 资源组按 resource_zones 过滤，只汇总属于当前分区的变量
-    variables = group["variables"]
-    resource_zones = group["resource_zones"]
-    coefficient = float(group.get("coefficient", 1.0))#可选系数，默认1.0
+def _series_value(resource, period) -> float:
+    """读取负荷时序值，并在需要时从标幺值换算为 MW。"""
 
-    expr = poi.ExprBuilder()
-    for resource_id, resource_zone in resource_zones.items():
-        if resource_zone != zone_id:#只保留属于当前 zone_id 的资源。
-            continue
-
-        key = (resource_id, period)
-        if key not in variables:
-            raise KeyError(f"Missing resource variable: {key}")
-
-        expr += coefficient * variables[key]
-
-    return expr
+    # 缺失任一调度时段会导致平衡式不完整，因此直接报错。
+    if period not in resource.TSCapacity:
+        raise ValueError(f"Missing time-series value: {(resource.id, period)}")
+    # 数据层已完成中文字段和单位清洗，这里只转换为浮点数。
+    value = float(resource.TSCapacity[period])
+    # 标幺时序需要乘资源容量才能得到实际 MW。
+    if resource.isPU:
+        value *= float(resource.capacity)
+    # 负荷必须是有限非负数，避免 NaN 或负需求进入模型。
+    if not math.isfinite(value) or value < 0.0:
+        raise ValueError(f"Time-series value must be finite and nonnegative: {resource.id}")
+    return value

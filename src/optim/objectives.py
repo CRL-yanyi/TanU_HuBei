@@ -1,73 +1,69 @@
 # -*- coding: utf-8 -*-
+"""成员3目标函数。"""
+
 import math
-from typing import Any, Hashable, Iterable
 
 import pandas as pd
 import pyoptinterface as poi
 
 from src.model.grid import Grid
+from src.model.resource import Thermal
 from src.optim.opt_model import OptModel
 
 
-def set_thermal_cost_objective(
-    opt_model: OptModel,
-    grid: Grid,
-    periods: Iterable[Hashable],
-    step_hours: float | None = None,
-) -> dict[str, Any]:
-    """Set thermal generation, startup, and shutdown costs."""
+def setThermalObjective(
+    optmodel: OptModel,
+    gridData: Grid,
+    timeIdx: pd.DatetimeIndex,
+) -> None:
+    """薄入口：累计全部火电成本并设置最小化目标。"""
 
-    periods = tuple(periods)
-    if step_hours is None:
-        step_hours = _period_step_hours(periods)
-    if not math.isfinite(step_hours) or step_hours <= 0.0:
-        raise ValueError("step_hours must be a positive finite number")
-
-    variable_cost = poi.ExprBuilder()
-    startup_cost = poi.ExprBuilder()
-    shutdown_cost = poi.ExprBuilder()
-
-    for unit in grid.getResListFromType("THERMAL"):
-        linear_cost = _thermal_linear_cost(unit)
-        startup_unit_cost = float(getattr(unit, "startUpCost", 0.0))
-        shutdown_unit_cost = float(getattr(unit, "shutDownCost", 0.0))
-
-        for period in periods:
-            key = (unit.id, period)
-            variable_cost += (
-                linear_cost * step_hours * opt_model.get_var("thermal_power", key)
-            )
-            startup_cost += (
-                startup_unit_cost * opt_model.get_var("thermal_startup", key)
-            )
-            shutdown_cost += (
-                shutdown_unit_cost * opt_model.get_var("thermal_shutdown", key)
-            )
-
-    total_cost = variable_cost + startup_cost + shutdown_cost
-    opt_model.set_objective(total_cost, poi.ObjectiveSense.Minimize)
-
-    return {
-        "variable_cost": variable_cost,
-        "startup_cost": startup_cost,
-        "shutdown_cost": shutdown_cost,
-        "total_cost": total_cost,
-    }
+    # 每次构建总目标前先清空旧表达式，避免重复调用导致成本重复累计。
+    optmodel.obj = poi.ExprBuilder()
+    # 各机组成本相互独立，逐台累加到统一目标表达式。
+    for thermal in gridData.getResListFromType("THERMAL"):
+        setThermalCostObj(optmodel, thermal, timeIdx)
+    # 全部成本项加入后，统一设置为最小化目标。
+    optmodel.setObjective(poi.ObjectiveSense.Minimize)
 
 
-def _thermal_linear_cost(unit: Any) -> float:
-    linear_cost = getattr(unit, "linearCost", None)
-    if linear_cost is not None:
-        return float(linear_cost)
-    return float(getattr(unit, "variableCost", 0.0))
+def setThermalCostObj(
+    optmodel: OptModel,
+    res: Thermal,
+    timeIdx: pd.DatetimeIndex,
+) -> None:
+    """累计单台火电的发电、启动和停机成本。"""
+
+    # MW 乘时段小时数得到 MWh，用于计算电量成本。
+    step_hours = _step_hours(timeIdx)
+    # 优先使用 TanU 命名 linearCost；缺省时兼容成员1的 variableCost。
+    linear_cost = res.linearCost
+    if linear_cost is None:
+        linear_cost = res.variableCost
+    # 确保成本参数参与表达式前是标准浮点数。
+    linear_cost = float(linear_cost)
+    # 每个时段分别累计发电成本、启动成本和停机成本。
+    for t in timeIdx:
+        optmodel.obj += (
+            linear_cost * step_hours * optmodel.getVar(res.id, t, "P")
+            + res.startUpCost * optmodel.getVar(res.id, t, "CV")
+            + res.shutDownCost * optmodel.getVar(res.id, t, "CW")
+        )
 
 
-def _period_step_hours(periods: Iterable[Hashable]) -> float:
-    periods_tuple = tuple(periods)
-    if len(periods_tuple) >= 2:
-        delta = periods_tuple[1] - periods_tuple[0]
-        if isinstance(delta, pd.Timedelta):
-            hours = delta / pd.Timedelta(hours=1)
-            if math.isfinite(hours) and hours > 0.0:
-                return float(hours)
-    return 1.0
+def _step_hours(timeIdx: pd.DatetimeIndex) -> float:
+    """从 DatetimeIndex 推导目标函数使用的小时步长。"""
+
+    # 多时段使用前两个相邻时间戳的实际差值。
+    if len(timeIdx) >= 2:
+        hours = (timeIdx[1] - timeIdx[0]) / pd.Timedelta(hours=1)
+    # 单时段优先读取 DatetimeIndex 自带频率。
+    elif timeIdx.freq is not None:
+        hours = timeIdx.freq.nanos / (3600 * 1e9)
+    # 无频率的单时段算例按项目默认的一小时处理。
+    else:
+        hours = 1.0
+    # 非正步长无法将功率换算为电量，应立即阻止建模。
+    if not math.isfinite(hours) or hours <= 0.0:
+        raise ValueError("timeIdx frequency must be positive")
+    return float(hours)

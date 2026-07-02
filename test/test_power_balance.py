@@ -1,183 +1,60 @@
+"""验证分区功率平衡中的负荷和联络线符号。"""
+
 import pandas as pd
 import pyoptinterface as poi
 import pytest
-from pyoptinterface import gurobi
 
 from src.model.grid import Grid
 from src.model.intertran import Intertran
-from src.model.resource import Thermal
+from src.model.resource import Load, Thermal
 from src.model.zone import Zone
-from src.optim.constraints.power_balance import add_power_balance_constraints
+from src.optim.constraints.power_balance import setPowerBalanceCons
 from src.optim.opt_model import OptModel
-from src.optim.variables import add_thermal_variables, add_transmission_variables
+from src.optim.variables import setIntertranVarList, setThermalVarList
 
 
-def make_periods(count=1):
-    return pd.date_range("2026-01-01 00:00", periods=count, freq="h")
+def test_single_zone_power_balance_reads_load_resource():
+    """单分区中火电出力应自动等于 Load.TSCapacity。"""
 
-
-def make_grid(with_line=False):
-    grid = Grid(id="TEST")
-    grid.addZone(Zone(id="Z1"))
+    # 构造 50 MW 固定负荷和一台无容量约束的火电机组。
+    periods = pd.date_range("2026-01-01", periods=1, freq="h")
+    grid = Grid(id="TEST"); grid.addZone(Zone(id="Z1"))
     grid.addResource(Thermal(id="G1", zoneId="Z1", type="THERMAL"))
-    if with_line:
-        grid.addZone(Zone(id="Z2"))
-        grid.addIntertran(
-            Intertran(
-                id="L1",
-                fromZone="Z1",
-                toZone="Z2",
-                capacityToZone=100.0,
-                capacityFromZone=100.0,
-            )
-        )
-    return grid
+    grid.addResource(Load(id="D1", zoneId="Z1", type="LOAD",
+                          TSCapacity={periods[0]: 50.0}))
+    optmodel = OptModel(); setThermalVarList(optmodel, grid, periods)
+    # 平衡式 P_thermal-50=0，因此无需额外目标即可得到 50 MW。
+    setPowerBalanceCons(optmodel, grid, periods)
+    optmodel.optimize()
+    assert optmodel.getValue(optmodel.getVar("G1", periods[0], "P")) == pytest.approx(50)
 
 
-def test_single_zone_power_balance():
-    opt_model = OptModel()
-    periods = make_periods()
-    grid = make_grid()
-    add_thermal_variables(opt_model, grid, periods)
+def test_two_zone_balance_uses_intertran_variable():
+    """起点发电应通过正向联络线供应终点分区负荷。"""
 
-    add_power_balance_constraints(
-        model=opt_model.model,
-        grid=grid,
-        periods=periods,
-        demand_mw={("Z1", periods[0]): 50.0},
-        supply_groups=[
-            {
-                "variables": opt_model.vars["thermal_power"],
-                "resource_zones": {"G1": "Z1"},
-            }
-        ],
-    )
-
-    opt_model.optimize()
-    assert opt_model.get_value(opt_model.vars["thermal_power"]["G1", periods[0]]) == pytest.approx(50.0)
+    # Z1 发电 100 MW，其中本地消纳 40 MW，剩余 60 MW 流向 Z2。
+    periods = pd.date_range("2026-01-01", periods=1, freq="h")
+    grid = Grid(id="TEST"); grid.addZone(Zone(id="Z1")); grid.addZone(Zone(id="Z2"))
+    grid.addResource(Thermal(id="G1", zoneId="Z1", type="THERMAL"))
+    grid.addResource(Load(id="D1", zoneId="Z1", type="LOAD", TSCapacity={periods[0]: 40}))
+    grid.addResource(Load(id="D2", zoneId="Z2", type="LOAD", TSCapacity={periods[0]: 60}))
+    grid.addIntertran(Intertran(id="L1", fromZone="Z1", toZone="Z2",
+                                capacityToZone=100, capacityFromZone=100))
+    # 火电和输电变量都登记到同一个 OptModel 变量表。
+    optmodel = OptModel(); setThermalVarList(optmodel, grid, periods)
+    setIntertranVarList(optmodel, grid, periods)
+    setPowerBalanceCons(optmodel, grid, periods)
+    # 固定总发电后，两条分区平衡等式共同确定断面潮流。
+    optmodel.model.add_linear_constraint(optmodel.getVar("G1", periods[0], "P"), poi.Eq, 100)
+    optmodel.optimize()
+    assert optmodel.getValue(optmodel.getVar("INTERTRANL1", periods[0], "P")) == pytest.approx(60)
 
 
-def test_two_zone_power_balance_with_transmission():
-    opt_model = OptModel()
-    periods = make_periods()
-    grid = make_grid(with_line=True)
-    add_thermal_variables(opt_model, grid, periods)
-    transmission = add_transmission_variables(opt_model.model, ["INTERTRANL1"], periods)
+def test_missing_load_series_is_rejected():
+    """负荷缺少当前时段数据时不能建立不完整平衡式。"""
 
-    add_power_balance_constraints(
-        model=opt_model.model,
-        grid=grid,
-        periods=periods,
-        demand_mw={
-            ("Z1", periods[0]): 40.0,
-            ("Z2", periods[0]): 60.0,
-        },
-        supply_groups=[
-            {
-                "variables": opt_model.vars["thermal_power"],
-                "resource_zones": {"G1": "Z1"},
-            }
-        ],
-        transmission_flow=transmission.flow,
-    )
-
-    opt_model.model.add_linear_constraint(
-        opt_model.vars["thermal_power"]["G1", periods[0]], poi.Eq, 100.0
-    )
-    opt_model.optimize()
-
-    assert opt_model.get_value(transmission.flow["INTERTRANL1", periods[0]]) == pytest.approx(
-        60.0
-    )
-
-
-def test_external_injection_offsets_demand():
-    opt_model = OptModel()
-    periods = make_periods()
-    grid = make_grid()
-    add_thermal_variables(opt_model, grid, periods)
-
-    add_power_balance_constraints(
-        model=opt_model.model,
-        grid=grid,
-        periods=periods,
-        demand_mw={("Z1", periods[0]): 50.0},
-        supply_groups=[
-            {
-                "variables": opt_model.vars["thermal_power"],
-                "resource_zones": {"G1": "Z1"},
-            }
-        ],
-        fixed_external_injection_mw={("Z1", periods[0]): 20.0},
-    )
-
-    opt_model.optimize()
-    assert opt_model.get_value(opt_model.vars["thermal_power"]["G1", periods[0]]) == pytest.approx(30.0)
-
-
-def test_demand_group_subtracts_from_balance():
-    opt_model = OptModel()
-    periods = make_periods()
-    grid = make_grid()
-    add_thermal_variables(opt_model, grid, periods)
-    load = opt_model.model.add_variables(
-        [("L1", periods[0])],
-        lb=0.0,
-        domain=poi.VariableDomain.Continuous,
-        name="load_power",
-    )
-
-    add_power_balance_constraints(
-        model=opt_model.model,
-        grid=grid,
-        periods=periods,
-        demand_mw={("Z1", periods[0]): 50.0},
-        supply_groups=[
-            {
-                "variables": opt_model.vars["thermal_power"],
-                "resource_zones": {"G1": "Z1"},
-            }
-        ],
-        demand_groups=[
-            {
-                "variables": load,
-                "resource_zones": {"L1": "Z1"},
-            }
-        ],
-    )
-
-    opt_model.model.add_linear_constraint(load["L1", periods[0]], poi.Eq, 10.0)
-    opt_model.optimize()
-    assert opt_model.get_value(opt_model.vars["thermal_power"]["G1", periods[0]]) == pytest.approx(60.0)
-
-
-def test_reject_missing_demand():
-    model = gurobi.Model()
-    periods = make_periods()
-    grid = make_grid()
-
-    with pytest.raises(ValueError, match="Missing zonal demand"):
-        add_power_balance_constraints(
-            model=model,
-            grid=grid,
-            periods=periods,
-            demand_mw={},
-        )
-
-
-def test_reject_missing_transmission_variable():
-    model = gurobi.Model()
-    periods = make_periods()
-    grid = make_grid(with_line=True)
-
-    with pytest.raises(KeyError, match="Missing transmission flow"):
-        add_power_balance_constraints(
-            model=model,
-            grid=grid,
-            periods=periods,
-            demand_mw={
-                ("Z1", periods[0]): 0.0,
-                ("Z2", periods[0]): 0.0,
-            },
-            transmission_flow={},
-        )
+    periods = pd.date_range("2026-01-01", periods=1, freq="h")
+    grid = Grid(id="TEST"); grid.addZone(Zone(id="Z1"))
+    grid.addResource(Load(id="D1", zoneId="Z1", type="LOAD"))
+    with pytest.raises(ValueError, match="Missing time-series value"):
+        setPowerBalanceCons(OptModel(), grid, periods)

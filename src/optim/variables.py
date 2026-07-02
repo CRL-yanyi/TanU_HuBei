@@ -1,5 +1,4 @@
 # -*- coding: utf-8 -*-
-import math
 from dataclasses import dataclass
 from typing import Any, Hashable, Iterable
 
@@ -9,90 +8,23 @@ import pyoptinterface as poi
 VariableKey = tuple[str, Hashable]
 
 
-def add_thermal_variables(opt_model, grid, periods):
-    """Create thermal variables directly on opt_model.vars."""
+def setThermalVarList(optmodel, gridData, timeIdx):
+    """创建火电出力和启停变量，直接登记到 ``optmodel.vars``。"""
 
-    unit_ids = tuple(grid.getResIdListFromType("THERMAL"))
-    periods = tuple(periods)
-
-    if len(unit_ids) != len(set(unit_ids)):
-        raise ValueError("火电机组 ID 不能重复")
-
-    if len(periods) != len(set(periods)):
-        raise ValueError("时间索引不能重复")
-
-    keys = [
-        (unit_id, period)
-        for unit_id in unit_ids
-        for period in periods
-    ]
-
-    opt_model.add_var_group(
-        "thermal_power",
-        keys,
-        lb=0.0,
-        domain=poi.VariableDomain.Continuous,
-        name="thermal_power",
-    )
-    opt_model.add_var_group(
-        "thermal_is_on",
-        keys,
-        domain=poi.VariableDomain.Binary,
-        name="thermal_is_on",
-    )
-    opt_model.add_var_group(
-        "thermal_startup",
-        keys,
-        domain=poi.VariableDomain.Binary,
-        name="thermal_startup",
-    )
-    opt_model.add_var_group(
-        "thermal_shutdown",
-        keys,
-        domain=poi.VariableDomain.Binary,
-        name="thermal_shutdown",
-    )
+    # 从 Grid 统一取得火电 ID，变量创建函数不再接收额外 ID 列表。
+    thermal_ids = gridData.getResIdListFromType("THERMAL")
+    # P 是非负连续出力变量，单位为 MW。
+    optmodel.setVarList(thermal_ids, timeIdx, "P", lb=0.0)
+    # C 会一次创建 CU、CV、CW 三类 0/1 机组组合变量。
+    optmodel.setVarList(thermal_ids, timeIdx, "C", lb=0.0, ub=1.0)
 
 
 
-@dataclass
-class TransmissionVariables:
-    """区域间可控输电断面变量集合。"""
+def setIntertranVarList(optmodel, gridData, timeIdx):
+    """创建可双向取值的区域间输电功率变量。"""
 
-    flow: dict[VariableKey, Any]
-
-
-def add_transmission_variables(
-    model: Any,
-    line_ids: Iterable[str],
-    periods: Iterable[Hashable],
-) -> TransmissionVariables:
-    """创建区域间可控断面功率变量。"""
-
-    line_ids = tuple(line_ids)
-    periods = tuple(periods)
-
-    if len(line_ids) != len(set(line_ids)):
-        raise ValueError("输电断面 ID 不能重复")
-
-    if len(periods) != len(set(periods)):
-        raise ValueError("时间索引不能重复")
-
-    keys = [
-        (line_id, period)
-        for line_id in line_ids
-        for period in periods
-    ]
-
-    flow = model.add_variables(
-        keys,
-        lb=-math.inf,
-        ub=math.inf,
-        domain=poi.VariableDomain.Continuous,
-        name="transmission_flow",
-    )
-
-    return TransmissionVariables(flow=flow)
+    # 负值表示反向潮流；真实上下限由 transmission.py 的断面约束给出。
+    optmodel.setVarList(gridData.intertrans, timeIdx, "P", lb=-1e8, ub=1e8)
 
 
 @dataclass

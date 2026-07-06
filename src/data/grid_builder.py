@@ -124,6 +124,30 @@ def _require_zone_exists(grid: Grid, zone_id: str, source: str) -> None:
         raise KeyError(f"{source} references zone '{zone_id}', but it is not in grid '{grid.id}'.")
 
 
+def _spec_row(spec: pd.DataFrame | None, zone_name: str) -> dict[str, Any] | None:
+    """按分区读取容量参数行；旧脱敏CaseData没有参数表时返回None。"""
+    if spec is None or spec.empty or "zone_name" not in spec.columns:
+        return None
+    rows = spec[spec["zone_name"].astype(str) == zone_name]
+    if len(rows) != 1:
+        raise ValueError(
+            f"Capacity specification must contain exactly one row for zone "
+            f"'{zone_name}', got {len(rows)}"
+        )
+    return rows.iloc[0].to_dict()
+
+
+def _monthly_capacity(row: dict[str, Any], table: str) -> dict:
+    """把规范化的12个月容量列转换为以月首日期为键的MW字典。"""
+    result = {}
+    for month in range(1, 13):
+        field = f"month_{month:02d}_mw"
+        result[pd.Timestamp(2030, month, 1).date()] = _require_float(
+            row, field, table
+        )
+    return result
+
+
 # =============================================================================
 # 二、主入口：CaseData -> Grid
 # =============================================================================
@@ -406,7 +430,14 @@ def _add_load_resources(grid: Grid, case_data) -> None:
         zone_name = str(zone_name)
         _require_zone_exists(grid, zone_name, "load_curves")
 
-        max_load = float(case_data.load_curves[zone_name].max())
+        spec = _spec_row(getattr(case_data, "load_spec", None), zone_name)
+        if spec is None:
+            # 兼容旧脱敏数据：曲线本身按MW处理。
+            max_load = float(case_data.load_curves[zone_name].max())
+            is_pu = False
+        else:
+            max_load = _require_float(spec, "peak_load_mw", "load_spec")
+            is_pu = True
 
         load = Load(
             id=_with_prefix("LOAD", zone_name),
@@ -416,7 +447,12 @@ def _add_load_resources(grid: Grid, case_data) -> None:
             capacity=max_load,
             Pmax=max_load,
             Pmin=0.0,
+            isPU=is_pu,
         )
+        load.TSCapacity = {
+            period: float(value)
+            for period, value in case_data.load_curves[zone_name].items()
+        }
 
         grid.addResource(load)
 
@@ -433,15 +469,26 @@ def _add_wind_resources(grid: Grid, case_data) -> None:
         zone_name = str(zone_name)
         _require_zone_exists(grid, zone_name, "wind_curves")
 
+        spec = _spec_row(getattr(case_data, "wind_spec", None), zone_name)
+        monthly_capacity = (
+            _monthly_capacity(spec, "wind_spec") if spec is not None else {}
+        )
+        capacity = max(monthly_capacity.values(), default=1.0)
         wind = Wind(
             id=_with_prefix("WIND", zone_name),
             name=f"{zone_name}风电",
             zoneId=zone_name,
             type="WIND",
-            capacity=1.0,
-            Pmax=1.0,
+            capacity=capacity,
+            Pmax=capacity,
             Pmin=0.0,
+            isPU=True,
         )
+        wind.TSCapacity = {
+            period: float(value)
+            for period, value in case_data.wind_curves[zone_name].items()
+        }
+        wind.monthly_capacity_mw = monthly_capacity
 
         grid.addResource(wind)
 
@@ -457,15 +504,26 @@ def _add_pv_resources(grid: Grid, case_data) -> None:
         zone_name = str(zone_name)
         _require_zone_exists(grid, zone_name, "pv_curves")
 
+        spec = _spec_row(getattr(case_data, "pv_spec", None), zone_name)
+        monthly_capacity = (
+            _monthly_capacity(spec, "pv_spec") if spec is not None else {}
+        )
+        capacity = max(monthly_capacity.values(), default=1.0)
         pv = PV(
             id=_with_prefix("PV", zone_name),
             name=f"{zone_name}光伏",
             zoneId=zone_name,
             type="PV",
-            capacity=1.0,
-            Pmax=1.0,
+            capacity=capacity,
+            Pmax=capacity,
             Pmin=0.0,
+            isPU=True,
         )
+        pv.TSCapacity = {
+            period: float(value)
+            for period, value in case_data.pv_curves[zone_name].items()
+        }
+        pv.monthly_capacity_mw = monthly_capacity
 
         grid.addResource(pv)
 
@@ -484,9 +542,9 @@ def _attach_hydro_flows(grid: Grid, case_data) -> None:
 
     for basin_name, flow_df in hydro_flows.items():
         basin_id = _with_prefix("BASIN", basin_name)
-        basin = _find_basin(grid, basin_id)
+        basins = _find_basins(grid, basin_id)
 
-        if basin is None:
+        if not basins:
             warnings.warn(
                 f"Hydro flow basin '{basin_id}' has no matching Basin object in Grid; skipped.",
                 UserWarning,
@@ -494,25 +552,26 @@ def _attach_hydro_flows(grid: Grid, case_data) -> None:
             )
             continue
 
-        if "平均" in flow_df.index:
-            basin.average = flow_df.loc["平均"].to_dict()
+        for basin in basins:
+            if "平均" in flow_df.index:
+                basin.average = flow_df.loc["平均"].to_dict()
 
-        if "强迫" in flow_df.index:
-            basin.forced = flow_df.loc["强迫"].to_dict()
+            if "强迫" in flow_df.index:
+                basin.forced = flow_df.loc["强迫"].to_dict()
 
-        if "预想" in flow_df.index:
-            basin.predicted = flow_df.loc["预想"].to_dict()
+            if "预想" in flow_df.index:
+                basin.predicted = flow_df.loc["预想"].to_dict()
 
 
-def _find_basin(grid: Grid, basin_id: str) -> Basin | None:
+def _find_basins(grid: Grid, basin_id: str) -> list[Basin]:
     """
     在 Grid 的所有 Zone 中查找 Basin。
 
     Basin 被存放在：
         grid.zones[zone_id].basinDict
     """
-    for zone in grid.zones.values():
-        if basin_id in zone.basinDict:
-            return zone.basinDict[basin_id]
-
-    return None
+    return [
+        zone.basinDict[basin_id]
+        for zone in grid.zones.values()
+        if basin_id in zone.basinDict
+    ]

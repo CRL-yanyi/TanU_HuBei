@@ -23,6 +23,7 @@ def test_storage_charge_discharge_limits_and_efficiency():
         Emax=100.0,
         Emin=0.0,
         E0=50.0,
+        EnT=50.0,
         effC=0.9,
         effD=0.9,
     )
@@ -66,6 +67,7 @@ def test_storage_simultaneous_charge_discharge_exclusion():
         Emax=100.0,
         Emin=0.0,
         E0=50.0,
+        EnT=50.0,
         effC=0.9,
         effD=0.9,
     )

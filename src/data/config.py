@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import os
+import pandas as pd
 import yaml
 
 class CaseConfig:
@@ -46,9 +47,13 @@ class TimeConfig:
     配置模拟运行的时间范围和步长，辅助时序数据切片。
     """
     def __init__(self, start_hour=0, end_hour=23, start_date="2030-01-01"):
-        self.start_hour = start_hour  # 0-indexed hour of the year (0 to 8759)
-        self.end_hour = end_hour      # 0-indexed hour of the year (0 to 8759)
-        self.start_date = start_date
+        self.start_hour = int(start_hour)  # 0-indexed hour of the year (0 to 8759)
+        self.end_hour = int(end_hour)      # 0-indexed hour of the year (0 to 8759)
+        self.start_date = str(start_date)
+        if self.start_hour < 0:
+            raise ValueError("start_hour must be nonnegative")
+        if self.end_hour < self.start_hour:
+            raise ValueError("end_hour must not be earlier than start_hour")
 
     @property # 函数包装为变量
     def hours_list(self):
@@ -57,6 +62,12 @@ class TimeConfig:
     @property
     def duration_hours(self):
         return self.end_hour - self.start_hour + 1
+
+    @property
+    def time_index(self) -> pd.DatetimeIndex:
+        """返回与年内小时序号对应的规范逐小时时间索引。"""
+        start = pd.Timestamp(self.start_date) + pd.Timedelta(hours=self.start_hour)
+        return pd.date_range(start=start, periods=self.duration_hours, freq="h")
 
 
 def load_case_config(config_path):

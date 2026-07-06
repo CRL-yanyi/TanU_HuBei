@@ -7,9 +7,26 @@ class CaseData:
     统一的数据载入载体结构，直接供给对象层构建 Grid 使用。
     """
 
-    def __init__(self, zones, transmissions, thermal_units, hydro_units,
-                 storage_units, pumped_storage_units, load_curves,
-                 wind_curves, pv_curves, hydro_flows=None, dc_flows=None, metadata=None):
+    def __init__(
+        self,
+        zones,
+        transmissions,
+        thermal_units,
+        hydro_units,
+        storage_units,
+        pumped_storage_units,
+        load_curves,
+        wind_curves,
+        pv_curves,
+        hydro_flows=None,
+        dc_flows=None,
+        metadata=None,
+        *,
+        time_index=None,
+        load_spec=None,
+        wind_spec=None,
+        pv_spec=None,
+    ):
 
         self.zones = zones                  # 分区
         self.transmissions = transmissions  # 输电线路
@@ -22,6 +39,16 @@ class CaseData:
         self.load_curves = load_curves      # 全年负荷曲线
         self.wind_curves = wind_curves      # 全年风光曲线
         self.pv_curves = pv_curves          # 全年光伏曲线
+        self.time_index = (
+            time_index
+            if time_index is not None
+            else getattr(load_curves, "index", pd.DatetimeIndex([]))
+        )
+
+        # 分区负荷及风光月装机参数。可选默认值保持脱敏旧测试兼容。
+        self.load_spec = load_spec if load_spec is not None else pd.DataFrame()
+        self.wind_spec = wind_spec if wind_spec is not None else pd.DataFrame()
+        self.pv_spec = pv_spec if pv_spec is not None else pd.DataFrame()
 
         # 流域流量/出力过程线 (字典存储)
         self.hydro_flows = hydro_flows if hydro_flows is not None else {}

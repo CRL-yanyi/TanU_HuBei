@@ -210,7 +210,24 @@ def load_case(case_config_path: str, time_config: TimeConfig = None, scenario: i
     hydro_df = list(load_excel(hydro_file).values())[0]
     hydro_df = hydro_df.rename(columns=config.get_mapping('hydro'))
 
-    # 1.5 储能
+    # 1.5 分区负荷、风电和光伏容量参数
+    load_spec_file = config.get_file_path('load_spec', project_root)
+    load_spec_df = list(load_excel(load_spec_file).values())[0]
+    load_spec_df = load_spec_df.rename(columns=config.get_mapping('load_spec'))
+
+    wind_spec_file = config.get_file_path('wind_spec', project_root)
+    wind_spec_df = list(load_excel(wind_spec_file).values())[0]
+    wind_spec_df = wind_spec_df.rename(
+        columns=config.get_mapping('renewable_spec')
+    )
+
+    pv_spec_file = config.get_file_path('pv_spec', project_root)
+    pv_spec_df = list(load_excel(pv_spec_file).values())[0]
+    pv_spec_df = pv_spec_df.rename(
+        columns=config.get_mapping('renewable_spec')
+    )
+
+    # 1.6 储能
     storage_file = config.get_file_path('storage', project_root)
     storage_df = list(load_excel(storage_file).values())[0]
 
@@ -238,7 +255,7 @@ def load_case(case_config_path: str, time_config: TimeConfig = None, scenario: i
             if storage_df[col].max() > 1.0:
                 storage_df[col] = storage_df[col] / 100.0
 
-    # 1.6 抽水蓄能
+    # 1.7 抽水蓄能
     pumped_file = config.get_file_path('pumped_storage', project_root)
     pumped_df = list(load_excel(pumped_file).values())[0]
 
@@ -326,10 +343,10 @@ def load_case(case_config_path: str, time_config: TimeConfig = None, scenario: i
     if os.path.exists(basin_flow_dir):
         for f in os.listdir(basin_flow_dir):
             if f.endswith(('.xls', '.xlsx')) and f.startswith('鄂'):
-                # 解析文件名中的流域和类型，例如 鄂三峡平均.xls -> basin='三峡', type='平均'
+                # 保留原始流域名称中的“鄂”，与水电机组表的 basin_name 一致。
                 name = f.replace('.xlsx', '').replace('.xls', '')
                 proc_type = name[-2:]  # 平均、强迫、预想
-                basin_name = name[1:-2] # 移除前面的 '鄂' 和后面的类型
+                basin_name = name[:-2]
                 
                 if proc_type in ['平均', '强迫', '预想']:
                     file_path = os.path.join(basin_flow_dir, f)
@@ -340,21 +357,44 @@ def load_case(case_config_path: str, time_config: TimeConfig = None, scenario: i
                     month_data = first_df.iloc[0].values[:12]
                     
                     if basin_name not in hydro_flows:
-                        hydro_flows[basin_name] = pd.DataFrame(index=['平均', '强迫', '预想'], columns=list(range(1, 13)))
+                        month_keys = [
+                            pd.Timestamp(2030, month, 1).date()
+                            for month in range(1, 13)
+                        ]
+                        hydro_flows[basin_name] = pd.DataFrame(
+                            index=['平均', '强迫', '预想'],
+                            columns=month_keys,
+                        )
                     hydro_flows[basin_name].loc[proc_type] = month_data
 
     # 5. 时间范围切片
     if time_config is not None:
-        load_curves = load_curves.iloc[time_config.hours_list].reset_index(drop=True)
-        wind_curves = wind_curves.iloc[time_config.hours_list].reset_index(drop=True)
-        pv_curves = pv_curves.iloc[time_config.hours_list].reset_index(drop=True)
+        time_index = time_config.time_index
+        load_curves = load_curves.iloc[time_config.hours_list].copy()
+        wind_curves = wind_curves.iloc[time_config.hours_list].copy()
+        pv_curves = pv_curves.iloc[time_config.hours_list].copy()
         if not dc_flows.empty:
-            dc_flows = dc_flows.iloc[time_config.hours_list].reset_index(drop=True)
+            dc_flows = dc_flows.iloc[time_config.hours_list].copy()
+    else:
+        time_index = pd.date_range(
+            start="2030-01-01",
+            periods=len(load_curves),
+            freq="h",
+        )
+
+    # 所有逐时时序共享同一 DatetimeIndex，避免模型按位置错配资源数据。
+    for frame in (load_curves, wind_curves, pv_curves):
+        frame.index = time_index
+    if not dc_flows.empty:
+        dc_flows.index = time_index
 
     metadata = {
+        'case_name': config.case_name,
         'case_config_path': case_config_path,
         'loaded_hours': len(load_curves),
-        'scenario': scenario
+        'scenario': scenario,
+        'start_timestamp': time_index[0] if len(time_index) else None,
+        'end_timestamp': time_index[-1] if len(time_index) else None,
     }
 
     return CaseData(
@@ -367,6 +407,10 @@ def load_case(case_config_path: str, time_config: TimeConfig = None, scenario: i
         load_curves=load_curves,
         wind_curves=wind_curves,
         pv_curves=pv_curves,
+        time_index=time_index,
+        load_spec=load_spec_df,
+        wind_spec=wind_spec_df,
+        pv_spec=pv_spec_df,
         hydro_flows=hydro_flows,
         dc_flows=dc_flows,
         metadata=metadata
@@ -433,14 +477,113 @@ def validate_case_data(case_data: CaseData) -> DataValidationReport:
     
     if load_len != wind_len or load_len != pv_len:
         errors.append(f"时序曲线数据长度不一致！负荷: {load_len}, 风电: {wind_len}, 光伏: {pv_len}")
-        
-    # 检查负荷曲线是否含有负值
-    if not case_data.load_curves.empty:
-        neg_loads = (case_data.load_curves < 0).sum().sum()
-        if neg_loads > 0:
-            errors.append("负荷曲线中检测到负数负荷值，请检查原始数据！")
 
-    # 4. 物理参数合理性校验
+    time_index = getattr(case_data, "time_index", None)
+    if not isinstance(time_index, pd.DatetimeIndex):
+        errors.append("CaseData.time_index 必须是 pandas.DatetimeIndex")
+    elif len(time_index) != load_len:
+        errors.append(
+            f"CaseData.time_index 长度 {len(time_index)} 与时序长度 {load_len} 不一致"
+        )
+    else:
+        if time_index.has_duplicates or not time_index.is_monotonic_increasing:
+            errors.append("CaseData.time_index 必须无重复且严格递增")
+        if len(time_index) >= 2:
+            deltas = time_index[1:] - time_index[:-1]
+            if any(delta != pd.Timedelta(hours=1) for delta in deltas):
+                errors.append("CaseData.time_index 必须使用连续1小时时间步长")
+
+    for name, frame in (
+        ("load_curves", case_data.load_curves),
+        ("wind_curves", case_data.wind_curves),
+        ("pv_curves", case_data.pv_curves),
+        ("dc_flows", case_data.dc_flows),
+    ):
+        if frame is None or frame.empty:
+            if name != "dc_flows":
+                errors.append(f"时序表 '{name}' 为空")
+            continue
+        if isinstance(time_index, pd.DatetimeIndex) and not frame.index.equals(
+            time_index
+        ):
+            errors.append(f"时序表 '{name}' 的索引与 CaseData.time_index 不一致")
+        values = frame.to_numpy(dtype=float)
+        if not np.isfinite(values).all() or (values < 0.0).any():
+            errors.append(f"时序表 '{name}' 必须全部为有限非负数")
+        if name in {"load_curves", "wind_curves", "pv_curves"} and (
+            values > 1.0
+        ).any():
+            errors.append(f"标幺时序表 '{name}' 不得大于1.0")
+
+    # 4. 分区负荷和风光装机参数校验
+    load_spec = getattr(case_data, "load_spec", pd.DataFrame())
+    if load_spec.empty or not {"zone_name", "peak_load_mw"}.issubset(
+        load_spec.columns
+    ):
+        errors.append("load_spec 缺少 zone_name 或 peak_load_mw")
+    else:
+        missing_zones = zone_names - set(load_spec["zone_name"].astype(str))
+        if missing_zones:
+            errors.append(f"load_spec 缺少分区: {sorted(missing_zones)}")
+        peak_values = pd.to_numeric(load_spec["peak_load_mw"], errors="coerce")
+        if peak_values.isna().any() or (peak_values <= 0.0).any():
+            errors.append("load_spec.peak_load_mw 必须为有限正数")
+
+    month_columns = [f"month_{month:02d}_mw" for month in range(1, 13)]
+    for name in ("wind_spec", "pv_spec"):
+        spec = getattr(case_data, name, pd.DataFrame())
+        required = {"zone_name", *month_columns}
+        if spec.empty or not required.issubset(spec.columns):
+            errors.append(f"{name} 缺少分区或12个月装机容量字段")
+            continue
+        missing_zones = zone_names - set(spec["zone_name"].astype(str))
+        if missing_zones:
+            errors.append(f"{name} 缺少分区: {sorted(missing_zones)}")
+        capacity_values = spec[month_columns].apply(
+            pd.to_numeric, errors="coerce"
+        )
+        if (
+            capacity_values.isna().any().any()
+            or not np.isfinite(capacity_values.to_numpy()).all()
+            or (capacity_values < 0.0).any().any()
+        ):
+            errors.append(f"{name} 的月装机容量必须为有限非负数")
+
+    # 5. 流域三段式完整性和上下界一致性
+    expected_basins = (
+        set(case_data.hydro_units["basin_name"].dropna().astype(str))
+        if "basin_name" in case_data.hydro_units.columns
+        else set()
+    )
+    actual_basins = set(case_data.hydro_flows)
+    missing_basins = expected_basins - actual_basins
+    if missing_basins:
+        errors.append(f"hydro_flows 缺少流域: {sorted(missing_basins)}")
+    for basin_name in sorted(expected_basins & actual_basins):
+        flow = case_data.hydro_flows[basin_name]
+        required_rows = {"平均", "强迫", "预想"}
+        if not required_rows.issubset(flow.index) or len(flow.columns) != 12:
+            errors.append(f"流域 {basin_name} 缺少平均、强迫、预想或12个月数据")
+            continue
+        numeric = flow.loc[["平均", "强迫", "预想"]].apply(
+            pd.to_numeric, errors="coerce"
+        )
+        if (
+            numeric.isna().any().any()
+            or not np.isfinite(numeric.to_numpy()).all()
+            or (numeric < 0.0).any().any()
+            or (numeric > 1.0).any().any()
+        ):
+            errors.append(f"流域 {basin_name} 三段式系数必须位于[0, 1]")
+            continue
+        conflict = (
+            (numeric.loc["强迫"] > numeric.loc["平均"])
+            | (numeric.loc["平均"] > numeric.loc["预想"])
+        )
+        if conflict.any():
+            errors.append(f"流域 {basin_name} 存在强迫、平均、预想顺序冲突")
+
+    # 6. 物理参数合理性校验
     # 储能效率和 SOC 范围 [0, 1]
     if not case_data.storage_units.empty:
         for col in ['charge_efficiency', 'discharge_efficiency']:
@@ -467,7 +610,10 @@ def validate_case_data(case_data: CaseData) -> DataValidationReport:
         'total_hydro_units': len(case_data.hydro_units),
         'total_storage_units': len(case_data.storage_units),
         'total_pumped_storage_units': len(case_data.pumped_storage_units),
-        'curve_length_hours': load_len
+        'curve_length_hours': load_len,
+        'time_start': time_index[0] if isinstance(time_index, pd.DatetimeIndex) and len(time_index) else None,
+        'time_end': time_index[-1] if isinstance(time_index, pd.DatetimeIndex) and len(time_index) else None,
+        'hydro_basin_processes': len(actual_basins),
     }
 
     return DataValidationReport(

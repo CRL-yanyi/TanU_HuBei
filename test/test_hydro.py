@@ -32,11 +32,11 @@ def test_hydro_capacity_limits():
     vars = add_hydro_variables(model, ["HYDROH1"], [0, 1])
     add_hydro_constraints(model, grid, vars, [0, 1])
     
-    # Minimize power output -> should hit Pmin
+    # 参考项目只使用非负变量和 Pmax，不设置单机 Pmin 硬约束。
     model.set_objective(vars.power["HYDROH1", 0] + vars.power["HYDROH1", 1], poi.ObjectiveSense.Minimize)
     model.optimize()
-    assert model.get_value(vars.power["HYDROH1", 0]) == pytest.approx(10.0)
-    assert model.get_value(vars.power["HYDROH1", 1]) == pytest.approx(10.0)
+    assert model.get_value(vars.power["HYDROH1", 0]) == pytest.approx(0.0)
+    assert model.get_value(vars.power["HYDROH1", 1]) == pytest.approx(0.0)
     
     # Maximize power output -> should hit Pmax
     model.set_objective(vars.power["HYDROH1", 0] + vars.power["HYDROH1", 1], poi.ObjectiveSense.Maximize)

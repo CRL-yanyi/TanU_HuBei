@@ -2,6 +2,7 @@
 """分区功率平衡约束。"""
 
 import math
+from collections.abc import Mapping
 
 import pandas as pd
 import pyoptinterface as poi
@@ -15,12 +16,27 @@ def setPowerBalanceCons(
     optmodel: OptModel,
     gridData: Grid,
     timeIdx: pd.DatetimeIndex,
+    *,
+    include_load_shedding: bool = False,
+    fixed_external_injection_mw: Mapping[tuple[str, pd.Timestamp], float]
+    | None = None,
 ) -> None:
-    """为每个分区添加逐时功率平衡。"""
+    """为每个分区添加逐时功率平衡。
+
+    ``fixed_external_injection_mw`` 使用正值表示外部电网向省内分区注入。
+    失负荷变量只有在调用方显式创建并启用后才进入平衡，保持旧调用兼容。
+    """
 
     # 每个 Zone 独立建立平衡等式，联络线变量负责分区之间的耦合。
     for zone in gridData.zones.values():
-        setZonePowerBalanceCons(optmodel, zone, gridData, timeIdx)
+        setZonePowerBalanceCons(
+            optmodel,
+            zone,
+            gridData,
+            timeIdx,
+            include_load_shedding=include_load_shedding,
+            fixed_external_injection_mw=fixed_external_injection_mw,
+        )
 
 
 def setZonePowerBalanceCons(
@@ -29,6 +45,10 @@ def setZonePowerBalanceCons(
     gridData: Grid,
     timeIdx: pd.DatetimeIndex,
     constype: str = "P",
+    *,
+    include_load_shedding: bool = False,
+    fixed_external_injection_mw: Mapping[tuple[str, pd.Timestamp], float]
+    | None = None,
 ) -> None:
     """汇总分区内资源与联络线，使净注入等于零。"""
 
@@ -49,7 +69,28 @@ def setZonePowerBalanceCons(
 
         # 负荷是固定需求，因此从表达式中扣除其逐时 MW 值。
         for load in gridData.getResListFromZoneAndType(zone.id, "LOAD"):
-            expr -= _series_value(load, t)
+            demand = _series_value(load, t)
+            expr -= demand
+            if include_load_shedding:
+                shed = optmodel.getVar(load.id, t, "P", "shed")
+                expr += shed
+                # 失负荷不能超过该负荷资源当前时段的实际需求。
+                optmodel.addCons(
+                    (load.id, t, "P_SHED", "2.9.3"),
+                    shed,
+                    poi.Leq,
+                    demand,
+                )
+
+        if fixed_external_injection_mw is not None:
+            injection = float(
+                fixed_external_injection_mw.get((zone.id, t), 0.0)
+            )
+            if not math.isfinite(injection):
+                raise ValueError(
+                    f"External injection must be finite: {(zone.id, t)}"
+                )
+            expr += injection
 
         # 正潮流定义为 fromZone -> toZone：终点加流入，起点减流出。
         for line in gridData.intertrans.values():

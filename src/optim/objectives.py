@@ -27,6 +27,47 @@ def setThermalObjective(
     optmodel.setObjective(poi.ObjectiveSense.Minimize)
 
 
+def setProductionObjective(
+    optmodel: OptModel,
+    gridData: Grid,
+    timeIdx: pd.DatetimeIndex,
+    *,
+    include_load_shedding: bool = False,
+) -> None:
+    """设置首期生产模拟完整目标函数。
+
+    目标包含火电发电与启停成本、弃风弃光惩罚；启用失负荷时再加入
+    ``Load.curtailmentPenalty × P/shed``。所有功率成本均乘时间步长，
+    将元/MWh与MW正确换算为元。
+    """
+    optmodel.obj = poi.ExprBuilder()
+    for thermal in gridData.getResListFromType("THERMAL"):
+        setThermalCostObj(optmodel, thermal, timeIdx)
+
+    step_hours = _step_hours(timeIdx)
+    for renewable_type in ("WIND", "PV"):
+        for resource in gridData.getResListFromType(renewable_type):
+            penalty = float(resource.curtailmentPenalty)
+            for period in timeIdx:
+                optmodel.obj += (
+                    penalty
+                    * step_hours
+                    * optmodel.getVar(resource.id, period, "P", "curt")
+                )
+
+    if include_load_shedding:
+        for load in gridData.getResListFromType("LOAD"):
+            penalty = float(load.curtailmentPenalty)
+            for period in timeIdx:
+                optmodel.obj += (
+                    penalty
+                    * step_hours
+                    * optmodel.getVar(load.id, period, "P", "shed")
+                )
+
+    optmodel.setObjective(poi.ObjectiveSense.Minimize)
+
+
 def setThermalCostObj(
     optmodel: OptModel,
     res: Thermal,

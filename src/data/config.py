@@ -75,3 +75,60 @@ def load_case_config(config_path):
     with open(config_path, 'r', encoding='utf-8') as f:
         case_dict = yaml.safe_load(f)
     return CaseConfig(case_dict)
+
+class RunConfig:
+    """
+    成员五运行层配置。
+
+    这个类只做 YAML 到属性的轻量转换，不在这里写建模逻辑。
+    保留 member5_0623 中 runner.py 需要的字段名，例如 solver_name、
+    rolling_enable、window_hours、overlap_hours 等。
+    """
+
+    def __init__(self, run_dict):
+        run_dict = run_dict or {}
+
+        self.case_name = run_dict.get("case_name", "hubei2030")
+        self.scenario = run_dict.get("scenario", 0)
+
+        simulation = run_dict.get("simulation", {})
+        self.mode = str(simulation.get("mode", "UC")).upper()
+        self.start_hour = int(simulation.get("start_hour", 0))
+        self.end_hour = int(simulation.get("end_hour", 167))
+        self.step_hours = float(simulation.get("step_hours", 1.0))
+
+        if self.step_hours != 1.0:
+            raise ValueError("当前 TimeConfig 只支持按整小时 start_hour/end_hour 切片，请先保持 step_hours=1.0。")
+
+        solver = run_dict.get("solver", {})
+        self.solver_name = str(solver.get("name", "GUROBI")).upper()
+        self.mip_gap = float(solver.get("mip_gap", 0.01))
+        self.time_limit = int(solver.get("time_limit", 300))
+        self.log_to_console = bool(solver.get("log_to_console", False))
+
+        rolling = run_dict.get("rolling", {})
+        self.rolling_enable = bool(rolling.get("enable", True))
+        self.window_hours = int(rolling.get("window_hours", self.end_hour - self.start_hour + 1))
+        self.overlap_hours = int(rolling.get("overlap_hours", 0))
+
+        switches = run_dict.get("switches", {})
+        self.include_load_shedding = bool(switches.get("include_load_shedding", True))
+        self.enable_transmission = bool(switches.get("enable_transmission", True))
+
+        # 下面这些先保留字段，方便兼容上一版配置；当前 runner 不主动启用未完成模块。
+        self.enable_reserve = bool(switches.get("enable_reserve", False))
+        self.enable_cascade_hydro = bool(switches.get("enable_cascade_hydro", False))
+
+        self.curtailment_penalty_wind = float(switches.get("curtailment_penalty_wind", 500.0))
+        self.curtailment_penalty_pv = float(switches.get("curtailment_penalty_pv", 500.0))
+        self.load_shed_penalty = float(switches.get("load_shed_penalty", 100000.0))
+
+        self.default_load_reserve_rate = float(switches.get("default_load_reserve_rate", 0.03))
+        self.default_contingency_reserve_rate = float(switches.get("default_contingency_reserve_rate", 0.02))
+        self.default_spinning_reserve_rate = float(switches.get("default_spinning_reserve_rate", 0.5))
+
+
+def load_run_config(config_path):
+    with open(config_path, "r", encoding="utf-8") as f:
+        run_dict = yaml.safe_load(f)
+    return RunConfig(run_dict)

@@ -483,7 +483,7 @@ class RollingSimulator:
         total_best_bound = 0.0
         
         # 直流外来电落地关系与容量规格 (预先计算)
-        dc_target_zones = case_data.metadata.get("dc_target_zones")
+        dc_target_zones = case_data.metadata.get("dc_target_zones") or {}
         dc_capacities = {}
         config_capacities = case_data.metadata.get("dc_capacities") or {}
         for line_name in dc_target_zones.keys():
@@ -510,6 +510,7 @@ class RollingSimulator:
             
             # 2. 建立变量与构建约束、目标函数 (类似师兄的 uc.buildModel())
             periods = list(range(w_start, w_end_model + 1))
+
             uc_model.build(grid, periods, run_config, case_data, states)
             
             # 3. 模型求解 (类似师兄的 solveModel())

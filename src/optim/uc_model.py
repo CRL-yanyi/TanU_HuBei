@@ -104,15 +104,18 @@ class UCModel:
         """
         return self.period_alias.get(period, period)
 
+    def to_period(self, period):
+        return self.to_timestamp(period)
+
     def build(self, grid, periods: list[int], run_config, case_data, states: dict):
         """
         核心装配方法：定义变量 -> 拼装约束 -> 设置目标函数
         """
         self.periods = self._to_time_index(periods, case_data, run_config)
 
-        self.add_variables(grid)
-        self.add_constraints(grid, run_config, case_data, states)
-        self.set_objective(grid, run_config)
+        self.add_variables(grid, self.periods, run_config)
+        self.add_constraints(grid, self.periods, run_config, case_data, states)
+        self.set_objective(grid, self.periods, run_config)
 
     def value(self, res_id, period, var_type, idx="0") -> float:
         """
@@ -124,7 +127,7 @@ class UCModel:
             uc_model.value("STORAGE001", 0, "P", "PC")
             uc_model.value("PV鄂东", 0, "P", "curt")
         """
-        p = self.to_period(period)
+        p = self.to_timestamp(period)
         var = self.optmodel.getVar(res_id, p, var_type, idx)
         return float(self.optmodel.getValue(var))
 

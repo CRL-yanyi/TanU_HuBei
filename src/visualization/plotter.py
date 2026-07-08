@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
 import os
+import matplotlib
+matplotlib.use("Agg")
+
+import matplotlib.pyplot as plt
 import pandas as pd
 from src.simulation.result import SimulationResult
 
